@@ -62,3 +62,7 @@ __pycache__/
 venv/
 env/
 .DS_Store
+
+# -- team: local data (never committed) ---------------------------------------------------------
+external/
+fake_data/
