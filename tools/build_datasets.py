@@ -35,6 +35,7 @@ Output (one folder; see the README.md written into it):
     README.md  splits.json  summary.csv
     matches/<MATCH>/meta.json            match facts, timeline, ground-truth statistics
     matches/<MATCH>/labels.csv           frame,label (H/A/D/X) -- the official scorer's format
+    matches/<MATCH>/labels_control.csv   the same, touches and false stops removed (control_labels)
     matches/<MATCH>/truth.npz            the clean tracking, for oracle experiments and debugging
     matches/<MATCH>/seed<k>/tracking.npz ATD-like degraded tracking: 46 slots + ball
     matches/<MATCH>/seed<k>/smart_tagging.xml   synthetic, SportsCode XML like the real file
@@ -123,6 +124,13 @@ TAG_RECALL = {"Throw-in": 0.55, "Corner Kick": 0.9, "Goal Kick": 0.55, "Free Kic
               "Kick Off (Start)": 1.0, "Kick Off (After Goal)": 1.0}
 TAG_WRONG_TEAM = 0.05
 TAG_FALSE = 0.03
+
+# Second version of the labels. DFL's BallPossession follows every touch; CHALLENGE.md says "a simple
+# touch of the ball without control" and "a deflection of a pass that does not intercept it" are not
+# a change of possession. Both thresholds are reasoned from football, never fitted to the public
+# minutes: a restart takes seconds, and one second is too short to control the ball.
+MIN_STOP_S = 1.0       # a dead run shorter than this between two live runs is not a real stoppage
+MIN_CONTROL_S = 1.0    # an opponent run shorter than this, same team on both sides, no stop, is a touch
 
 
 # ==================================================================================================
@@ -302,6 +310,39 @@ def make_clean(match, title, division, home, away, pitch, halves, players, playe
             "pitch": (float(L), float(W)), "halves": [tuple(int(v) for v in h) for h in halves], "n": int(n),
             "players": players, "player_team": player_team, "ball": ball, "status": status,
             "possession": possession, "labels": labels, "graded": graded, "flipped_second_half": flipped}
+
+
+def _runs(seg):
+    cut = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+    bounds = np.concatenate(([0], cut, [len(seg)]))
+    return [(int(p), int(q), seg[p]) for p, q in zip(bounds[:-1], bounds[1:])]
+
+
+def control_labels(labels, halves):
+    """The labels with CHALLENGE.md's notion of control applied: false stops removed first (they
+    would hide a touch), then touches merged into the possession around them. H H D D H H stays
+    two possessions whenever the stop is real. Returns (labels, counts of each change)."""
+    out = labels.copy()
+    counts = {"false_stops": 0, "touches": 0}
+    for _, a, b in halves:
+        seg = out[a:b + 1]
+        runs = _runs(seg)
+        for i in range(1, len(runs) - 1):
+            p, q, v = runs[i]
+            if v == "D" and q - p < MIN_STOP_S * FPS and runs[i - 1][2] in "HA" and runs[i + 1][2] in "HA":
+                seg[p:q] = runs[i - 1][2]
+                counts["false_stops"] += 1
+        while True:                        # one at a time, shortest first: merging can create new ones
+            runs = _runs(seg)
+            touches = [(q - p, p, q, runs[i - 1][2]) for i, (p, q, v) in enumerate(runs[1:-1], 1)
+                       if v in "HA" and q - p < MIN_CONTROL_S * FPS
+                       and runs[i - 1][2] in "HA" and runs[i - 1][2] == runs[i + 1][2]]
+            if not touches:
+                break
+            _, p, q, team = min(touches)
+            seg[p:q] = team
+            counts["touches"] += 1
+    return out, counts
 
 
 class _quiet:
@@ -531,9 +572,12 @@ def possession_stats(labels, halves):
         lengths += team_runs
     g = np.concatenate([labels[a:b + 1] for _, a, b in halves])
     minutes = len(g) / FPS / 60.0
+    live_minutes = np.sum(np.isin(g, ("H", "A"))) / FPS / 60.0
     return {"possessions": int(sum(per_half)), "per_half": per_half,
             "mean_possession_s": round(float(np.mean(lengths)) / FPS, 2) if lengths else 0.0,
             "possessions_per_min": round(sum(per_half) / minutes, 2),
+            "possessions_per_live_min": round(sum(per_half) / live_minutes, 2) if live_minutes else 0.0,
+            "short_possessions_under_1s": int(sum(n < FPS for n in lengths)),
             "share": {k: round(float(np.mean(g == k)), 4) for k in ("H", "A", "D")},
             "graded_minutes": round(minutes, 1)}
 
@@ -541,9 +585,11 @@ def possession_stats(labels, halves):
 def write_match(clean, out_dir, seeds, prm):
     folder = os.path.join(out_dir, "matches", clean["match"])
     os.makedirs(folder, exist_ok=True)
-    with open(os.path.join(folder, "labels.csv"), "w", newline="\n") as handle:
-        handle.write("frame,label\n")
-        handle.writelines("%d,%s\n" % (f, v) for f, v in enumerate(clean["labels"].tolist()))
+    control, changes = control_labels(clean["labels"], clean["halves"])
+    for name, labels in (("labels.csv", clean["labels"]), ("labels_control.csv", control)):
+        with open(os.path.join(folder, name), "w", newline="\n") as handle:
+            handle.write("frame,label\n")
+            handle.writelines("%d,%s\n" % (f, v) for f, v in enumerate(labels.tolist()))
     np.savez_compressed(os.path.join(folder, "truth.npz"), players_cm=to_cm(clean["players"]),
                         player_team=clean["player_team"], ball_cm=to_cm(clean["ball"]),
                         ball_status=clean["status"], ball_possession=clean["possession"])
@@ -553,7 +599,10 @@ def write_match(clean, out_dir, seeds, prm):
             "citation": CITATION, "fps": FPS, "n_frames": clean["n"], "pitch_m": list(clean["pitch"]),
             "halves": [list(h) for h in clean["halves"]], "flipped_second_half": clean["flipped_second_half"],
             "labels": "D where BallStatus=0, else the BallPossession team; X outside the halves",
-            "ground_truth": gt, "seeds": list(seeds)}
+            "labels_control": "labels.csv with stops under %g s removed, then opponent runs under %g s "
+                              "between two runs of the same team merged into them" % (MIN_STOP_S, MIN_CONTROL_S),
+            "ground_truth": gt, "ground_truth_control": dict(possession_stats(control, clean["halves"]), changes=changes),
+            "seeds": list(seeds)}
     with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2, ensure_ascii=False)
 
@@ -586,14 +635,16 @@ def write_match(clean, out_dir, seeds, prm):
 
 def load_match(dataset_dir, match, seed=0):
     """Everything a pipeline needs for one match, in the same units as the challenge loader:
-    metres from the top-left corner, frames on the match's own timeline."""
+    metres from the top-left corner, frames on the match's own timeline. Both label versions are
+    returned: an idea is only kept if it wins on both."""
     folder = os.path.join(dataset_dir, "matches", match)
     with open(os.path.join(folder, "meta.json"), encoding="utf-8") as handle:
         meta = json.load(handle)
     track = np.load(os.path.join(folder, "seed%d" % seed, "tracking.npz"))
-    labels = np.loadtxt(os.path.join(folder, "labels.csv"), delimiter=",", skiprows=1, dtype=str)[:, 1]
+    labels, control = (np.loadtxt(os.path.join(folder, name), delimiter=",", skiprows=1, dtype=str)[:, 1]
+                       for name in ("labels.csv", "labels_control.csv"))
     return {"meta": meta, "players": from_cm(track["slots_cm"]), "slot_team": track["slot_team"],
-            "ball": from_cm(track["ball_cm"]), "labels": labels,
+            "ball": from_cm(track["ball_cm"]), "labels": labels, "labels_control": control,
             "smart_tagging": os.path.join(folder, "seed%d" % seed, "smart_tagging.xml"),
             "truth": os.path.join(folder, "truth.npz")}
 
@@ -606,37 +657,46 @@ def verify(out_dir, splits):
     import possession_metrics as pm
     from baseline import smooth
 
-    print("\nverify: nearest-player baselines, official scorer, per match")
-    table = []
-    for split, items in splits.items():
-        for match, seed in items:
-            m = load_match(out_dir, match, seed)
-            players, ball, team = m["players"], m["ball"], m["slot_team"]
-            codes = np.full(len(ball), -1, dtype=np.int8)
-            seen = np.flatnonzero(~np.isnan(ball[:, 0]))
-            for s in range(0, len(seen), 20000):
-                idx = seen[s:s + 20000]
-                d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
-                d = np.where(np.isnan(d), np.inf, d)
-                k = np.argmin(d, axis=1)
-                ok = np.isfinite(d[np.arange(len(idx)), k])
-                codes[idx[ok]] = team[k[ok]]
-            gt = pm.label_codes(m["labels"])
-            row = {"split": split, "match": match, "seed": seed}
-            for w in (0, 25, 50, 125):
-                row["w%d" % w] = pm.evaluate(gt, pm.label_codes(smooth(codes, w)))["spell_f1_mean"]
-            table.append(row)
-            print("  %-5s %s s%d   raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (
-                split, match, seed, row["w0"], row["w25"], row["w50"], row["w125"]))
-    mean = {w: float(np.mean([r["w%d" % w] for r in table])) for w in (0, 25, 50, 125)}
-    order = sorted(mean, key=lambda w: -mean[w])
-    official = [50, 125, 25, 0]
-    print("  mean        raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (mean[0], mean[25], mean[50], mean[125]))
-    print("  ordering on these datasets: %s" % " > ".join("smooth%d" % w if w else "raw" for w in order))
-    print("  ordering on the real match: smooth50 > smooth125 > smooth25 > raw  -> %s" % (
-        "SAME: the datasets rank methods like the real match" if order == official else
-        "DIFFERENT: treat conclusions drawn on these datasets with caution"))
-    return table, mean, order == official
+    windows, official = (0, 25, 50, 125), [50, 125, 25, 0]
+    result = {}
+    for version in ("labels", "labels_control"):
+        print("\nverify (%s): nearest-player baselines, official scorer, per match" % version)
+        table = []
+        for split, items in splits.items():
+            for match, seed in items:
+                m = load_match(out_dir, match, seed)
+                gt = pm.label_codes(m[version])
+                row = {"split": split, "match": match, "seed": seed}
+                for w in windows:
+                    row["w%d" % w] = pm.evaluate(gt, pm.label_codes(smooth(_nearest_codes(m), w)))["spell_f1_mean"]
+                table.append(row)
+                print("  %-5s %s s%d   raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (
+                    split, match, seed, row["w0"], row["w25"], row["w50"], row["w125"]))
+        mean = {w: float(np.mean([r["w%d" % w] for r in table])) for w in windows}
+        order = sorted(mean, key=lambda w: -mean[w])
+        print("  mean        raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (
+            mean[0], mean[25], mean[50], mean[125]))
+        print("  ordering on these datasets: %s" % " > ".join("smooth%d" % w if w else "raw" for w in order))
+        print("  ordering on the real match: smooth50 > smooth125 > smooth25 > raw  -> %s" % (
+            "SAME: the datasets rank methods like the real match" if order == official else
+            "DIFFERENT: treat conclusions drawn on these datasets with caution"))
+        result[version] = (table, mean, order == official)
+    return result
+
+
+def _nearest_codes(m):
+    """The official baseline's raw answer: the team of the slot nearest to the ball."""
+    players, ball, team = m["players"], m["ball"], m["slot_team"]
+    codes = np.full(len(ball), -1, dtype=np.int8)
+    seen = np.flatnonzero(~np.isnan(ball[:, 0]))
+    for s in range(0, len(seen), 20000):
+        idx = seen[s:s + 20000]
+        d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
+        d = np.where(np.isnan(d), np.inf, d)
+        k = np.argmin(d, axis=1)
+        ok = np.isfinite(d[np.arange(len(idx)), k])
+        codes[idx[ok]] = team[k[ok]]
+    return codes
 
 
 # ==================================================================================================
@@ -688,7 +748,8 @@ todos los hiperparámetros y umbrales en estos partidos u otros, nunca en el del
 ```
 matches/<PARTIDO>/meta.json              equipos, partes (frames), campo, estadísticas de la verdad
 matches/<PARTIDO>/labels.csv             frame,label (H/A/D/X): el formato del scorer oficial
-matches/<PARTIDO>/truth.npz              tracking limpio (para experimentos de oráculo)
+matches/<PARTIDO>/labels_control.csv     lo mismo, con la regla de control de CHALLENGE.md (abajo)
+matches/<PARTIDO>/truth.npz             tracking limpio (para experimentos de oráculo)
 matches/<PARTIDO>/seed<k>/tracking.npz   tracking degradado tipo ATD: 46 slots + balón
 matches/<PARTIDO>/seed<k>/smart_tagging.xml   Smart Tagging sintético (formato SportsCode)
 matches/<PARTIDO>/seed<k>/degradation.json    parámetros y estadísticas de la degradación
@@ -699,6 +760,26 @@ por el tamaño del campo. Cárgalo con `load_match()` de `tools/build_datasets.p
 
 La línea de tiempo de cada partido: {pad_before} s sin juego, la 1ª parte, {halftime} s de
 descanso, la 2ª parte y {pad_after} s sin juego. Fuera de las partes la verdad es X y no se puntúa.
+
+## Dos versiones de las etiquetas
+- `labels.csv`: la verdad de la DFL tal cual. `D` donde `BallStatus = 0`; si no, el equipo de
+  `BallPossession`. La DFL cambia de equipo con cualquier toque: un 9–17% de sus posesiones dura
+  menos de 1 s, y muchas son un tramo corto del rival en medio de una posesión, sin parada.
+- `labels_control.csv`: la misma verdad con dos reglas sacadas del texto de CHALLENGE.md («un toque
+  sin control» y «un desvío de un pase que no lo intercepta» no son cambio de posesión), aplicadas
+  en este orden:
+  1. **Falsas paradas**: una `D` de menos de {min_stop} s entre dos tramos con balón vivo no es una
+     parada real (una reanudación tarda segundos) y pasa al equipo de antes. En IDSSE no hay
+     ninguna: la `D` más corta dura varios segundos.
+  2. **Toques**: un tramo del rival de menos de {min_control} s, con el mismo equipo antes y después
+     y sin parada en medio, se une a esa posesión. Una parada real no se toca: `H H D D H H`
+     siguen siendo dos posesiones.
+
+Los umbrales se razonan desde el fútbol y no se ajustan a nada; en particular, nunca a los 5
+minutos públicos. **Una idea solo entra si gana con las dos versiones**: así no dependemos de
+haber acertado con la transformación. `load_match()` devuelve las dos (`labels` y
+`labels_control`), y `meta.json` guarda las estadísticas de cada una y cuántos cambios hizo cada
+regla.
 
 ## En qué se parece y en qué no al partido del reto
 Parecido, por construcción:
@@ -717,8 +798,12 @@ Distinto, y conviene recordarlo:
   qué calidad las etiqueta Metrica, y simularlas metería supuestos nuestros en el modelo.
 - No hay vídeo ni homografía.
 - La definición de posesión de la DFL puede no coincidir al 100% con la del tracking corregido
-  de Metrica. Compara `ground_truth` de cada `meta.json` con los 5 minutos públicos
-  (17 posesiones de 14,2 s de media) solo para entender la definición, no para ajustar nada.
+  de Metrica (ver «Dos versiones de las etiquetas»). Compara `ground_truth` de cada `meta.json`
+  con los 5 minutos públicos solo para entender la definición, no para ajustar nada.
+- Los 5 minutos públicos son el arranque del partido, con pocas paradas y el Barça con el balón:
+  no representan el partido entero. En el partido completo `D` es la etiqueta más común
+  (`starter/make_dummy_submission.py`), así que el 40–50% de `D` de IDSSE no es una anomalía.
+  Compara posesiones por minuto de balón vivo, no por minuto evaluado.
 
 ## Estadísticas
 {stats_table}
@@ -731,29 +816,34 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, verify_result):
     split_table = "| partición | partidos | semillas |\n|---|---|---|\n" + "\n".join(
         "| %s | %s | %s |" % (s, ", ".join(sorted({m for m, _ in items})), seeds_per_split[s])
         for s, items in splits.items())
-    stats = ["| partido | partición | división | min evaluados | posesiones | posesiones/min | duración media | % D | balón visible | objetos |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    stats = ["| partido | partición | división | min evaluados | % D | posesiones | por min vivo | < 1 s | duración media "
+             "| posesiones (control) | por min vivo (control) | duración media (control) | balón visible | objetos |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for meta in metas:
-        gt = meta["ground_truth"]
+        gt, gc = meta["ground_truth"], meta["ground_truth_control"]
         r = [x for x in rows if x["match"] == meta["match"]]
-        stats.append("| %s (%s) | %s | %s | %.0f | %d | %.2f | %.1f s | %.1f%% | %.1f%% | %.1f |" % (
+        stats.append("| %s (%s) | %s | %s | %.0f | %.1f%% | %d | %.2f | %d | %.1f s | %d | %.2f | %.1f s | %.1f%% | %.1f |" % (
             meta["match"], meta["title"], split_of.get(meta["match"], "-"), meta["division"], gt["graded_minutes"],
-            gt["possessions"], gt["possessions_per_min"], gt["mean_possession_s"], 100 * gt["share"]["D"],
+            100 * gt["share"]["D"], gt["possessions"], gt["possessions_per_live_min"], gt["short_possessions_under_1s"],
+            gt["mean_possession_s"], gc["possessions"], gc["possessions_per_live_min"], gc["mean_possession_s"],
             100 * np.mean([x["ball_visible_graded"] for x in r]), np.mean([x["mean_tracked_objects_graded"] for x in r])))
-    stats.append("| *referencia: 5 min públicos del reto* | | | 5 | 17 | 3,40 | 14,2 s | 19,6% | 59,3%* | 20,5* |")
+    stats.append("| *referencia: 5 min públicos del reto (arranque, no representativo)* | | | 5 | 19,6% | 17 | 4,2 | | 14,2 s "
+                 "| | | | 59,3%* | 20,5* |")
     stats.append("\n\\* del partido completo, según DATA.md.")
     verify_text = ""
     if verify_result:
-        table, mean, same = verify_result
         verify_text = ("\n## Comprobación\nBaselines oficiales (más cercano + voto por mayoría) puntuados con el scorer "
-                       "oficial, media de todos los partidos: raw %.3f · smooth25 %.3f · smooth50 %.3f · smooth125 %.3f. "
-                       "En el partido real el orden es smooth50 > smooth125 > smooth25 > raw: aquí %s.\n" % (
-                           mean[0], mean[25], mean[50], mean[125],
-                           "**se repite**, buena señal de que estos datos ordenan los métodos como el partido real" if same else
-                           "**no se repite**: tratad con cautela las conclusiones sacadas de estos datos"))
+                       "oficial, media de todos los partidos. En el partido real el orden es "
+                       "smooth50 > smooth125 > smooth25 > raw.\n\n"
+                       "| etiquetas | raw | smooth25 | smooth50 | smooth125 | ¿mismo orden? |\n|---|---|---|---|---|---|\n")
+        for version, (_, mean, same) in verify_result.items():
+            verify_text += "| `%s.csv` | %.3f | %.3f | %.3f | %.3f | %s |\n" % (
+                version, mean[0], mean[25], mean[50], mean[125],
+                "**sí**" if same else "**no**: cautela con las conclusiones sacadas de estos datos")
     seeds = ", ".join("%s ×%d" % (k, v) for k, v in seeds_per_split.items())
     text = README.format(date=time.strftime("%Y-%m-%d"), seeds=seeds, citation=CITATION,
                          split_table=split_table, pad_before=PAD_BEFORE_S, halftime=HALFTIME_S, pad_after=PAD_AFTER_S,
+                         min_stop="%g" % MIN_STOP_S, min_control="%g" % MIN_CONTROL_S,
                          stats_table="\n".join(stats), verify_text=verify_text)
     with open(os.path.join(out_dir, "README.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -802,6 +892,9 @@ def main():
                 time.time() - t1, gt["graded_minutes"], gt["possessions"], gt["possessions_per_min"],
                 gt["mean_possession_s"], 100 * gt["share"]["D"]))
             meta, rows = write_match(clean, out_dir, seeds, prm)
+            gc = meta["ground_truth_control"]
+            print("    control labels: %d possessions (mean %.1f s); %d touches merged, %d false stops removed" % (
+                gc["possessions"], gc["mean_possession_s"], gc["changes"]["touches"], gc["changes"]["false_stops"]))
             metas.append(meta)
             all_rows += [dict(r, match=match) for r in rows]
             splits[split] += [[match, s] for s in seeds]
@@ -810,13 +903,17 @@ def main():
         json.dump(splits, handle, indent=2)
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["match", "seed", "possessions", "possessions_per_min", "mean_possession_s", "dead_share",
-                         "ball_visible_graded", "mean_tracked_objects_graded", "smart_tagging_instances"])
+        writer.writerow(["match", "seed", "possessions", "possessions_per_min", "possessions_per_live_min",
+                         "mean_possession_s", "dead_share", "possessions_control", "possessions_per_live_min_control",
+                         "mean_possession_s_control", "ball_visible_graded", "mean_tracked_objects_graded",
+                         "smart_tagging_instances"])
         for r in all_rows:
-            gt = next(m for m in metas if m["match"] == r["match"])["ground_truth"]
-            writer.writerow([r["match"], r["seed"], gt["possessions"], gt["possessions_per_min"], gt["mean_possession_s"],
-                             gt["share"]["D"], r["ball_visible_graded"], r["mean_tracked_objects_graded"],
-                             r["smart_tagging_instances"]])
+            meta = next(m for m in metas if m["match"] == r["match"])
+            gt, gc = meta["ground_truth"], meta["ground_truth_control"]
+            writer.writerow([r["match"], r["seed"], gt["possessions"], gt["possessions_per_min"],
+                             gt["possessions_per_live_min"], gt["mean_possession_s"], gt["share"]["D"],
+                             gc["possessions"], gc["possessions_per_live_min"], gc["mean_possession_s"],
+                             r["ball_visible_graded"], r["mean_tracked_objects_graded"], r["smart_tagging_instances"]])
     result = verify(out_dir, {s: v for s, v in splits.items() if v}) if args.verify else None
     write_readme(out_dir, metas, all_rows, splits, seeds_per_split, result)
     print("\ndatasets in %s  (%.0f s)" % (out_dir, time.time() - t0))
