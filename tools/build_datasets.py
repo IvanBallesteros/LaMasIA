@@ -20,12 +20,14 @@ Two sources, two roles:
 Label harmonisation. DFL's BallPossession changes hands far more often than Metrica's criterion
 (it counts a touch). Two fixed clean-ups are applied to every source -- stoppages shorter than
 1 s, and possession flickers shorter than 0.2 s right after a restart, are data artefacts -- and
-one CALIBRATED rule to IDSSE: an opponent spell shorter than touch_s that returns to the same team
-without a stoppage is a touch, not a change of possession (CHALLENGE.md: "a simple touch without
-control", "a deflection", "an aerial duel won without subsequent control"). touch_s is chosen so
-that the IDSSE TRAIN matches have as many possessions per minute of live ball as the Metrica VAL
-games -- other games only, never the challenge match. The raw labels are kept beside the
-harmonised ones (labels_raw.csv), so every conclusion can be checked on both.
+one CONTROL rule to IDSSE: an opponent spell that returns to the same team without a stoppage is
+a touch, not a change of possession, if no opponent kept the ball within CONTROL_M metres for
+CONTROL_S seconds in the clean tracking (CHALLENGE.md: "a simple touch without control", "a
+deflection", "an aerial duel won without subsequent control"). The two values come from a grid
+scored against the duration distribution of the Metrica VAL games (label_harmonization.json keeps
+the grid, the loss and a cross-check between the two games) -- other games only, never the
+challenge match. The raw labels are kept beside the harmonised ones (labels_raw.csv), so every
+conclusion can be checked on both.
 
 Neither source is the challenge data: both are clean tracking with player identities. Every match
 is DEGRADED to look like the challenge ATD (46 anonymous slots, ball missing on ~41% of graded
@@ -57,6 +59,7 @@ missing: the challenge ATD's 0-1 coordinates times the pitch size. Load with loa
 """
 
 import argparse
+import bisect
 import csv
 import json
 import math
@@ -110,6 +113,7 @@ METRICA_FILES = {
     3: ["Sample_Game_3_events.json", "Sample_Game_3_metadata.xml", "Sample_Game_3_tracking.txt"],
 }
 METRICA_PITCH = (105.0, 68.0)          # stated in the sample-data README
+MAX_DEAD_S = 60.0                      # no restart this long after a stop: the next event restarts play
 
 # Split by MATCH, never by frame.
 DEFAULT_SPLITS = {"train": ["J03WPY", "J03WOH", "J03WQQ", "J03WN1"],
@@ -145,10 +149,14 @@ TAG_RECALL = {"Throw-in": 0.55, "Corner Kick": 0.9, "Goal Kick": 0.55, "Free Kic
 TAG_WRONG_TEAM = 0.05
 TAG_FALSE = 0.03
 
-# Label harmonisation: fixed artefact clean-ups for every source, plus the calibrated touch rule.
+# Label harmonisation: fixed artefact clean-ups for every source, plus the control rule for IDSSE.
 MIN_DEAD_S = 1.0                       # a real stoppage lasts seconds
 MIN_RESTART_SPELL_S = 0.2              # a flicker right after a restart is an artefact
-TOUCH_GRID = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+CONTROL_M, CONTROL_S = 1.5, 0.5        # team choice; the grid and cross-check are in label_harmonization.json
+CONTROL_GAP = 3                        # frames: a ball-tracking blip does not break a control spell
+CONTROL_MARGIN = 5                     # frames either side of a spell also searched for control
+CONTROL_GRID_M = (0.75, 1.0, 1.5, 2.0)
+CONTROL_GRID_S = (0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
 
 
 # ==================================================================================================
@@ -317,39 +325,54 @@ def parse_dfl(meta_path, positions_path, match):
 def labels_from_events(ev, n_frames):
     """Per original frame, H/A/D from Metrica's human event data, following its event definitions.
 
-      stop    -> D : BALL OUT (end), SHOT out or goal (end), FAULT RECEIVED (start), BALL LOST or
-                     PASS that is forced / end of half / offside / hand ball (end)
+      stop    -> D : BALL OUT (end), SHOT out or goal (end), FAULT RECEIVED (start), a CHALLENGE
+                     whose subtype has FAULT but not ADVANTAGE (start; many fouls are only tagged
+                     this way), BALL LOST or PASS that is forced / end of half / offside / hand ball (end)
       restart      : SET PIECE, or a GOAL KICK pass (start) -> that team, ball alive
-      possession   : PASS, RECOVERY, SHOT, CARRY (start) -> that team; a RECOVERY while the ball is
-                     dead brings it back into play ("RECOVERY ... brings the ball back into play
-                     via a dead-ball situation that is not a SET PIECE")
-    CHALLENGE, BALL LOST and CARD do not change possession by themselves: the opponent's
-    RECOVERY or PASS that follows does, at its start frame.
+      possession   : PASS, RECOVERY, SHOT, CARRY (start) -> that team, while the ball is alive
+    While the ball is dead only a restart brings it back: the events in between -- the keeper
+    fetching the ball after a shot wide, play the referee has already stopped for offside -- do
+    not. Two exceptions, where the stoppage has no tagged restart of its own, and the first
+    possession event restarts play: no restart follows within MAX_DEAD_S of the stop (a dropped
+    ball), or another stop comes before the next restart (that restart belongs to the later stop;
+    the tagger missed a quick restart). CHALLENGE, BALL LOST and CARD do not change possession by themselves:
+    the opponent's RECOVERY or PASS that follows does, at its start frame.
     """
     points = []
     for e in ev:
         sub = e["sub"].upper()
-        if e["type"] == "SET PIECE" or ("GOAL KICK" in sub and e["type"] in ("PASS", "BALL LOST")):
+        if e["type"] == "SET PIECE" or ("GOAL KICK" in sub and e["type"] in ("PASS", "BALL LOST", "BALL OUT")):
             points.append((e["start"], 0, "restart", e["team"]))
         elif e["type"] in ("PASS", "RECOVERY", "SHOT", "CARRY"):
             points.append((e["start"], 1, "own", e["team"]))
         if e["type"] == "BALL OUT" or (e["type"] == "SHOT" and ("OUT" in sub or "GOAL" in sub)):
             points.append((max(e["end"], e["start"]), 2, "stop", None))
-        elif e["type"] == "FAULT RECEIVED":
+        elif e["type"] == "FAULT RECEIVED" or (e["type"] == "CHALLENGE" and "FAULT" in sub and "ADVANTAGE" not in sub):
             points.append((e["start"], 2, "stop", None))
         elif e["type"] in ("BALL LOST", "PASS") and any(k in sub for k in ("FORCED", "END HALF", "OFFSIDE", "HAND BALL")):
             points.append((max(e["end"], e["start"]), 2, "stop", None))
     points.sort(key=lambda p: (p[0], p[1]))
+    restarts = [f for f, _, kind, _ in points if kind == "restart"]
+    stops = [f for f, _, kind, _ in points if kind == "stop"]
     lab = np.full(n_frames + 1, "D", dtype="<U1")
-    state, team, last = "D", None, 0
+    state, team, last, stopped = "D", None, 0, 0
     for f, _, kind, t in points:
         f = min(max(f, 0), n_frames)
         lab[last:f] = "D" if state == "D" else team
         if kind == "restart":
             state, team = "live", t
         elif kind == "own":
-            state, team = "live", t
+            if state == "live":
+                team = t
+            else:
+                i = bisect.bisect_right(restarts, stopped)          # first restart after the stop
+                nxt = restarts[i] if i < len(restarts) else None
+                j = bisect.bisect_right(stops, f)                    # first stop after this event
+                if nxt is None or nxt > stopped + MAX_DEAD_S * FPS or (j < len(stops) and stops[j] < nxt):
+                    state, team = "live", t
         else:
+            if state == "live":
+                stopped = f
             state = "D"
         last = f
     lab[last:] = "D"
@@ -543,15 +566,38 @@ def clean_artefacts(labels, halves):
     return out
 
 
-def merge_touches(labels, halves, touch_s):
+def ball_distances(clean):
+    """(distance of every player to the ball [n, P], inf where either is missing; player teams)."""
+    players, ball = clean["players"], clean["ball"][:, :2]
+    dist = np.full(players.shape[:2], np.inf, dtype=np.float32)
+    for s in range(0, len(ball), 20000):
+        with np.errstate(invalid="ignore"):
+            d = np.linalg.norm(players[s:s + 20000] - ball[s:s + 20000, None, :], axis=2)
+        dist[s:s + 20000] = np.where(np.isnan(d), np.inf, d)
+    return dist, clean["player_team"].astype(int)
+
+
+def team_control(dist, team, control_m, control_s):
+    """[n, 2] bool: a player of that team keeps the ball within control_m for >= control_s
+    (clean tracking; gaps of up to CONTROL_GAP frames do not break a spell)."""
+    ctrl = np.zeros((len(dist), 2), dtype=bool)
+    for k in range(dist.shape[1]):
+        near = dist[:, k] <= control_m
+        for p, q, v in _runs(near):
+            if not v and 0 < p and q < len(near) and q - p <= CONTROL_GAP:
+                near[p:q] = True
+        for p, q, v in _runs(near):
+            if v and q - p >= control_s * FPS:
+                ctrl[p:q, team[k]] = True
+    return ctrl
+
+
+def merge_uncontrolled(labels, halves, ctrl):
     """CHALLENGE.md: a touch, a deflection or a lost aerial duel is not a change of possession.
-    Inside each live stretch, a team spell shorter than touch_s whose neighbours both belong to the
-    other team -- or that ends the stretch right after the other team's spell -- goes back to that
-    team. The first spell after a restart is never touched: "there is always a clear possessor".
-    Shortest spells first, until none qualifies."""
-    if touch_s <= 0:
-        return labels.copy()
-    limit = touch_s * FPS
+    Inside each live stretch, a team spell whose neighbours both belong to the other team -- or
+    that ends the stretch right after the other team's spell -- goes back to that team if no player
+    of its own team controlled the ball during it (ctrl, from team_control). The first spell after
+    a restart is never touched: "there is always a clear possessor". Shortest spells first."""
     out = labels.copy()
     for _, a, b in halves:
         seg = out[a:b + 1]
@@ -563,17 +609,17 @@ def merge_touches(labels, halves, touch_s):
                 best = None
                 for i in range(1, len(runs)):
                     p, q, v = runs[i]
-                    if q - p >= limit:
+                    if v not in ("H", "A") or not (i == len(runs) - 1 or runs[i + 1][2] == runs[i - 1][2]):
                         continue
-                    last = i == len(runs) - 1
-                    if last or runs[i + 1][2] == runs[i - 1][2]:
-                        if best is None or q - p < runs[best][1] - runs[best][0]:
-                            best = i
+                    lo, hi = a + p0 + p - CONTROL_MARGIN, a + p0 + q + CONTROL_MARGIN
+                    if ctrl[max(lo, 0):hi, "HA".index(v)].any():
+                        continue
+                    if best is None or q - p < runs[best][1] - runs[best][0]:
+                        best = i
                 if best is None:
                     break
                 p, q, _ = runs[best]
-                team = runs[best - 1][2]
-                seg[p0 + p:p0 + q] = team
+                seg[p0 + p:p0 + q] = runs[best - 1][2]
                 runs = _runs(seg[p0:q0])
     return out
 
@@ -598,18 +644,56 @@ def possession_stats(labels, halves):
             "graded_minutes": round(minutes, 1)}
 
 
-def calibrate_touch(train, reference):
-    """touch_s whose harmonised TRAIN labels have the reference's possessions per live minute."""
-    target = float(np.mean([possession_stats(c["labels"], c["halves"])["possessions_per_alive_min"] for c in reference]))
-    table = []
-    for t in TOUCH_GRID:
-        stats = [possession_stats(merge_touches(c["labels"], c["halves"], t), c["halves"]) for c in train]
-        table.append({"touch_s": t,
-                      "possessions_per_alive_min": round(float(np.mean([s["possessions_per_alive_min"] for s in stats])), 2),
-                      "mean_possession_s": round(float(np.mean([s["mean_possession_s"] for s in stats])), 2),
-                      "share_under_1s": round(float(np.mean([s["share_under_1s"] for s in stats])), 4)})
-    best = min(table, key=lambda r: (abs(r["possessions_per_alive_min"] - target), r["touch_s"]))
-    return best["touch_s"], target, table
+def _durations(cleans):
+    out = []
+    for c in cleans:
+        for _, a, b in c["halves"]:
+            out += [q - p for p, q, v in _runs(c["labels"][a:b + 1]) if v in ("H", "A")]
+    return np.sort(np.array(out, dtype=float) / FPS)
+
+
+def distribution_loss(cleans, reference):
+    """How far the possession durations of `cleans` are from the reference's: the KS distance
+    between the two duration distributions plus the relative error in possessions per live minute."""
+    x, y = _durations(cleans), _durations(reference)
+    grid = np.union1d(x, y)
+    ks = float(np.max(np.abs(np.searchsorted(x, grid, "right") / len(x) - np.searchsorted(y, grid, "right") / len(y))))
+    def rate(cs):
+        return float(np.mean([possession_stats(c["labels"], c["halves"])["possessions_per_alive_min"] for c in cs]))
+    r, rr = rate(cleans), rate(reference)
+    return {"ks": round(ks, 4), "rate": round(r, 2), "rate_reference": round(rr, 2),
+            "median_s": round(float(np.median(x)), 2), "under_1s": round(float(np.mean(x < 1)), 4),
+            "under_2s": round(float(np.mean(x < 2)), 4), "under_5s": round(float(np.mean(x < 5)), 4),
+            "loss": round(ks + abs(r - rr) / rr, 4)}
+
+
+def calibrate_control(train, refs, chosen):
+    """The control rule over a grid, scored against the reference games' duration distribution
+    (all of them, and each one alone), plus a cross-check: fit on one game, score on the other."""
+    dists = [ball_distances(c) for c in train]
+    grid = []
+    for m in CONTROL_GRID_M:
+        for s in CONTROL_GRID_S:
+            merged = [dict(c, labels=merge_uncontrolled(c["labels"], c["halves"], team_control(d, t, m, s)))
+                      for c, (d, t) in zip(train, dists)]
+            row = {"control_m": m, "control_s": s, "all": distribution_loss(merged, list(refs.values()))}
+            row.update({name: distribution_loss(merged, [ref])["loss"] for name, ref in refs.items()})
+            grid.append(row)
+    best = min(grid, key=lambda r: r["all"]["loss"])
+    cross = []
+    names = sorted(refs)
+    for fit in names:
+        for check in names:
+            if check != fit:
+                pick = min(grid, key=lambda r: r[fit])
+                cross.append({"fit_on": fit, "picks": [pick["control_m"], pick["control_s"]],
+                              "loss_on_fit": pick[fit], "check_on": check, "loss_on_check": pick[check],
+                              "game_to_game_loss": distribution_loss([refs[fit]], [refs[check]])["loss"]})
+    picked = next(r for r in grid if [r["control_m"], r["control_s"]] == list(chosen))
+    unmerged = distribution_loss(train, list(refs.values()))
+    return {"references": names, "loss": "KS(durations) + |rate - rate_ref| / rate_ref", "grid": grid,
+            "best_on_all": [best["control_m"], best["control_s"]], "chosen": list(chosen), "chosen_scores": picked,
+            "no_merge": unmerged, "cross_validation": cross}
 
 
 # ==================================================================================================
@@ -1079,27 +1163,36 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, g
                     "orden distinto (%s)" % " > ".join("smooth%d" % w if w else "raw" for w in g["order"])))
         verify_text = "\n".join(lines) + "\n"
     h = harmonization
-    if h.get("calibrated"):
-        table = "\n".join("| %.2f | %.2f | %.1f s | %.1f%% | %s |" % (
-            r["touch_s"], r["possessions_per_alive_min"], r["mean_possession_s"], 100 * r["share_under_1s"],
-            "**sí**" if r["touch_s"] == h["touch_s"] else "") for r in h["table"])
-        htext = ("Dos limpiezas fijas para todas las fuentes: una parada de menos de {d} s no es una parada, y un "
-                 "cambio de menos de {r} s justo después de una reanudación es un parpadeo de los datos.\n\n"
-                 "Y una regla calibrada solo para IDSSE: un tramo del rival de menos de **{t} s** que vuelve al mismo "
-                 "equipo sin parada es un toque, no un cambio de posesión (CHALLENGE.md). El umbral se elige para que "
-                 "los partidos de **train** de IDSSE tengan tantas posesiones por minuto de balón vivo como los de "
-                 "**val_metrica** ({target:.2f}); otros partidos, nunca el del reto.\n\n"
-                 "| umbral (s) | posesiones por min vivo (train IDSSE) | duración media | < 1 s | elegido |\n|---|---|---|---|---|\n"
-                 ).format(d=MIN_DEAD_S, r=MIN_RESTART_SPELL_S, t=h["touch_s"], target=h["target"]) + table
-        if h["touch_s"] == TOUCH_GRID[0]:
-            htext += ("\n\nCon umbral 0 la regla no se aplica: los partidos de train ya tienen %s posesiones por minuto "
-                      "vivo que la referencia." % ("menos" if h["table"][0]["possessions_per_alive_min"] <= h["target"] else "más"))
-        elif h["touch_s"] == TOUCH_GRID[-1]:
-            htext += ("\n\n**Atención:** ni con el umbral máximo se llega a la referencia. Revisad las etiquetas de IDSSE "
-                      "a ojo antes de seguir: puede que la diferencia no sea solo de toques.")
+    htext = ("Dos limpiezas fijas para todas las fuentes: una parada de menos de %g s no es una parada, y un cambio "
+             "de menos de %g s justo después de una reanudación es un parpadeo de los datos.\n\n" % (MIN_DEAD_S, MIN_RESTART_SPELL_S))
+    if h["control_m"] > 0:
+        htext += ("Y una regla solo para IDSSE: un tramo del rival que vuelve al mismo equipo sin parada es un toque, no "
+                  "un cambio de posesión, si ningún jugador rival tuvo el balón a ≤ **%g m** durante ≥ **%g s** según el "
+                  "tracking limpio (CHALLENGE.md: «un toque sin control», «un desvío», «un duelo aéreo sin control "
+                  "posterior»). Los dos valores los fija el equipo; la calibración de abajo muestra cómo quedan frente "
+                  "al resto de la rejilla." % (h["control_m"], h["control_s"]))
     else:
-        htext = ("Limpiezas fijas (paradas < %.1f s y parpadeos < %.1f s tras una reanudación). Regla de toques: %s." % (
-            MIN_DEAD_S, MIN_RESTART_SPELL_S, "%.2f s (fijado a mano)" % h["touch_s"] if h.get("touch_s") else "no aplicada"))
+        htext += "Regla de control: no aplicada."
+    cal = h.get("calibration")
+    if cal:
+        rows = ["| d, c | posesiones por min vivo | mediana | < 1 s | < 2 s | < 5 s | KS | pérdida | %s |" %
+                " | ".join("pérdida %s" % n for n in cal["references"]),
+                "|---|---|---|---|---|---|---|---|%s" % ("---|" * len(cal["references"]))]
+        ref = cal["grid"][0]["all"]
+        for r in [dict(cal["no_merge"], label="sin regla")] + cal["grid"]:
+            a = r.get("all", r)
+            tag = r.get("label") or "%g m, %g s" % (r["control_m"], r["control_s"])
+            if [r.get("control_m"), r.get("control_s")] == cal["chosen"]:
+                tag = "**%s (elegida)**" % tag
+            rows.append("| %s | %.2f | %.1f s | %.1f%% | %.1f%% | %.1f%% | %.3f | %.3f | %s |" % (
+                tag, a["rate"], a["median_s"], 100 * a["under_1s"], 100 * a["under_2s"], 100 * a["under_5s"], a["ks"],
+                a["loss"], " | ".join("%.3f" % r[n] if n in r else "" for n in cal["references"])))
+        cross = "\n".join("- Elegida con %s: %g m, %g s → pérdida %.3f en %s y %.3f en %s (los dos partidos se diferencian "
+                          "entre sí en %.3f)." % (x["fit_on"], x["picks"][0], x["picks"][1], x["loss_on_fit"], x["fit_on"],
+                                                 x["loss_on_check"], x["check_on"], x["game_to_game_loss"])
+                          for x in cal["cross_validation"])
+        htext += ("\n\nCalibración: train de IDSSE contra la distribución de duraciones de val_metrica (%.2f posesiones por "
+                  "minuto vivo). Pérdida = %s.\n\n%s\n\n%s" % (ref["rate_reference"], cal["loss"], "\n".join(rows), cross))
     seeds = ", ".join("%s ×%d" % (k, v) for k, v in seeds_per_split.items())
     text = README.format(date=time.strftime("%Y-%m-%d"), seeds=seeds, cite_idsse=CITATION["idsse"],
                          cite_metrica=CITATION["metrica"], split_table=split_table, harmonization_text=htext,
@@ -1123,8 +1216,9 @@ def main():
     parser.add_argument("--matches", nargs="*", default=None, help="subset of match ids (default: all ten)")
     parser.add_argument("--train-seeds", type=int, default=2, help="degradations per training match")
     parser.add_argument("--eval-seeds", type=int, default=1, help="degradations per val/test match")
-    parser.add_argument("--touch-s", type=float, default=None,
-                        help="fix the touch rule instead of calibrating it on Metrica (0 = off)")
+    parser.add_argument("--control-m", type=float, default=CONTROL_M,
+                        help="control rule: distance to the ball in metres (0 = rule off)")
+    parser.add_argument("--control-s", type=float, default=CONTROL_S, help="control rule: seconds within that distance")
     parser.add_argument("--verify", action="store_true", help="score the official baselines on every match")
     parser.add_argument("--selftest", action="store_true", help="fake match as IDSSE + the Metrica games")
     args = parser.parse_args()
@@ -1161,30 +1255,44 @@ def main():
             gt["mean_possession_s"], 100 * gt["share"]["D"]))
         cleans[match] = clean
 
-    # Labels: fixed clean-ups everywhere, then the touch rule for DFL-labelled matches.
+    # Labels: fixed clean-ups everywhere, then the control rule for DFL-labelled matches.
     for c in cleans.values():
         c["labels"] = clean_artefacts(c["labels"], c["halves"])
     dfl = [m for m, c in cleans.items() if c["source"] in ("idsse", "fake")]
-    harmonization = {"min_dead_s": MIN_DEAD_S, "min_restart_spell_s": MIN_RESTART_SPELL_S, "touch_s": 0.0,
-                     "touch_applies_to": "idsse", "calibrated": False}
-    if args.touch_s is not None:
-        harmonization["touch_s"] = args.touch_s
-    else:
-        train = [cleans[m] for m in dfl if split_of[m] == "train"]
-        reference = [c for m, c in cleans.items() if split_of.get(m) == "val_metrica"]
-        if train and reference:
-            touch, target, table = calibrate_touch(train, reference)
-            harmonization.update(touch_s=touch, target=target, table=table, calibrated=True,
-                                 rule="possessions per live minute of IDSSE train = mean of val_metrica")
-            print("\ntouch rule calibrated on IDSSE train vs val_metrica (%.2f possessions per live min):" % target)
-            for r in table:
-                print("    touch %.2f s -> %.2f per live min, mean %.1f s, %4.1f%% under 1 s%s" % (
-                    r["touch_s"], r["possessions_per_alive_min"], r["mean_possession_s"], 100 * r["share_under_1s"],
-                    "   <- chosen" if r["touch_s"] == touch else ""))
-        elif dfl:
-            print("\n(no val_metrica games or no IDSSE train games: touch rule not calibrated, not applied)")
-    for m in dfl:
-        cleans[m]["labels"] = merge_touches(cleans[m]["labels"], cleans[m]["halves"], harmonization["touch_s"])
+    rule = {"min_dead_s": MIN_DEAD_S, "min_restart_spell_s": MIN_RESTART_SPELL_S, "rule": "control",
+            "control_m": args.control_m, "control_s": args.control_s, "applies_to": "idsse",
+            "control_gap_frames": CONTROL_GAP, "control_margin_frames": CONTROL_MARGIN}
+    harmonization = dict(rule)
+    train = [cleans[m] for m in dfl if split_of[m] == "train"]
+    refs = {m: c for m, c in cleans.items() if split_of.get(m) == "val_metrica"}
+    if train and refs and args.control_m > 0:
+        t1 = time.time()
+        cal = calibrate_control(train, refs, (args.control_m, args.control_s))
+        harmonization["calibration"] = cal
+        print("\ncontrol rule: IDSSE train vs %s, loss = %s   (%.0f s)" % ("+".join(cal["references"]), cal["loss"], time.time() - t1))
+        print("    %-14s %6s %7s %6s %6s %6s %6s %6s   %s" % ("d, c", "/min", "median", "<1 s", "<2 s", "<5 s", "KS", "loss",
+                                                         "   ".join("loss %s" % n for n in cal["references"])))
+        ref = distribution_loss(list(refs.values()), list(refs.values()))
+        print("    %-14s %6.2f %6.1fs %5.1f%% %5.1f%% %5.1f%%" % ("reference", ref["rate"], ref["median_s"], 100 * ref["under_1s"],
+                                                              100 * ref["under_2s"], 100 * ref["under_5s"]))
+        for r in [dict(cal["no_merge"], label="no merge")] + cal["grid"]:
+            a = r["all"] if "all" in r else r
+            label = r.get("label") or "%.2f m %.1f s" % (r["control_m"], r["control_s"])
+            print("    %-14s %6.2f %6.1fs %5.1f%% %5.1f%% %5.1f%% %6.3f %6.3f   %s%s" % (
+                label, a["rate"], a["median_s"], 100 * a["under_1s"], 100 * a["under_2s"], 100 * a["under_5s"], a["ks"],
+                a["loss"], "   ".join("%9.3f" % r[n] if n in r else "         " for n in cal["references"]),
+                "   <- chosen" if [r.get("control_m"), r.get("control_s")] == cal["chosen"] else
+                "   <- best" if [r.get("control_m"), r.get("control_s")] == cal["best_on_all"] else ""))
+        for x in cal["cross_validation"]:
+            print("    fit on %s -> %.2f m, %.1f s: loss %.3f there, %.3f on %s (the two games differ by %.3f)" % (
+                x["fit_on"], x["picks"][0], x["picks"][1], x["loss_on_fit"], x["loss_on_check"], x["check_on"],
+                x["game_to_game_loss"]))
+    elif dfl:
+        print("\n(no val_metrica games or no IDSSE train games: control rule applied without calibration report)")
+    if args.control_m > 0:
+        for m in dfl:
+            ctrl = team_control(*ball_distances(cleans[m]), args.control_m, args.control_s)
+            cleans[m]["labels"] = merge_uncontrolled(cleans[m]["labels"], cleans[m]["halves"], ctrl)
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "label_harmonization.json"), "w") as handle:
         json.dump(harmonization, handle, indent=2)
@@ -1199,8 +1307,8 @@ def main():
         seeds = list(range(seeds_per_split[split]))
         print("%s  writing (%s)" % (match, split))
         meta, rows = write_match(clean, out_dir, seeds, prm,
-                                 harmonization if clean["source"] != "metrica" else
-                                 dict(harmonization, touch_s=0.0, note="reference labels: touch rule not applied"))
+                                 rule if clean["source"] != "metrica" else
+                                 dict(rule, rule=None, note="reference labels: control rule not applied"))
         metas.append(meta)
         all_rows += [dict(r, match=match) for r in rows]
         splits[split] += [[match, s] for s in seeds]

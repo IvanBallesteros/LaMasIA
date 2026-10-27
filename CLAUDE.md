@@ -159,15 +159,21 @@ python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metr
   (Metrica 3). Si una idea gana en val pero pierde en val_metrica, desconfiad de ella. Los test no
   se miran hasta tener un candidato final.
 - **Etiquetas armonizadas** (`labels.csv`, por defecto) y **originales** (`labels_raw.csv`). La DFL
-  cuenta los toques del rival como cambios de posesión; en IDSSE, un tramo del rival más corto que
-  un umbral que vuelve al mismo equipo sin parada se trata como toque. El umbral se calibra para
-  que train de IDSSE tenga tantas posesiones por minuto de balón vivo como val_metrica
-  (`label_harmonization.json`). Una conclusión vale si se sostiene con las dos versiones.
+  cuenta los toques del rival como cambios de posesión; en IDSSE, un tramo del rival que vuelve al
+  mismo equipo sin parada se trata como toque si ningún rival tuvo el balón a ≤ 1,5 m durante
+  ≥ 0,5 s en el tracking limpio (regla de control). `label_harmonization.json` guarda la rejilla
+  calibrada contra la distribución de duraciones de val_metrica y la validación cruzada entre sus
+  dos partidos. Una conclusión vale si se sostiene con las dos versiones.
+- En Metrica, `labels_from_events` trata como parada un CHALLENGE con FAULT (sin ADVANTAGE), y con
+  el balón muerto solo un SET PIECE o un saque de puerta reanudan; si no hay reanudación propia (en
+  60 s o antes de la siguiente parada), el primer evento de posesión reanuda.
 - El tracking está **degradado** para parecerse al ATD (46 slots, balón ausente en ~41% de los
   frames, cambios de identidad) y el Smart Tagging es **sintético** (solo SET PIECES).
   **Ojo con el balón:** en Metrica falta durante las paradas; en IDSSE la degradación lo quita
   sobre todo con el balón en juego. No sabemos aún qué patrón sigue el ATD real: no construyas
-  señales que dependan de eso sin el diagnóstico del partido real.
+  señales que dependan de eso sin el diagnóstico del partido real
+  (`tools/ball_gap_diagnostic.py --data-dir ... --datasets external/datasets`, lo ejecuta una
+  persona; solo imprime agregados).
 - Es un dataset público, no del reto: **sí puedes leer `external/`**. Carga los partidos con
   `load_match()` de `tools/build_datasets.py` (`labels="raw"` para las originales).
 - Con `--verify`, comprueba por fuente y con las dos versiones de etiquetas si los baselines
