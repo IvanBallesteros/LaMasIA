@@ -1,49 +1,59 @@
 #!/usr/bin/env python3
 """Build train / validation / test datasets in the shape of the challenge, from public matches.
 
-Source: the IDSSE dataset (Bassek, Weber, Rein & Memmert, Scientific Data 2025), seven full matches
-of the 2022/23 Bundesliga and 2. Bundesliga with DFL position data at 25 fps, licensed CC BY 4.0.
-The organisers confirmed it may be used (metrica-sports/more-than-a-hack-2027, issue #16) on three
-conditions: cite it, choose every hyperparameter and threshold on IDSSE or other games, and use the
-5 public minutes of the provided game only to check the pipeline.
+Two sources, two roles:
 
-Why IDSSE: every ball frame carries BallStatus (alive/dead) and BallPossession (home/away), taken
-from corrected tracking. That is how the challenge's own ground truth is defined (CHALLENGE.md:
-"D where the corrected tracking marks the ball dead, otherwise the team the tracking names as
-owning it"), so the labels mean the same thing.
+  IDSSE (Bassek, Weber, Rein & Memmert, Scientific Data 2025; CC BY 4.0) -- 7 Bundesliga and
+  2. Bundesliga matches with DFL position data at 25 fps. Every ball frame carries BallStatus and
+  BallPossession from corrected tracking. Plenty of data: TRAIN, VAL and TEST.
+  Allowed by the organisers (metrica-sports/more-than-a-hack-2027, issue #16) if it is cited, if
+  every hyperparameter and threshold is chosen on it or other games, and if the 5 public minutes
+  of the provided game are only used to check the pipeline.
 
-What it is NOT: the challenge data. IDSSE is clean optical tracking with player identities and the
-ball almost always visible; the challenge ATD comes from video, uncorrected, with 46 anonymous
-slots and the ball missing on 41% of graded frames, and it comes with Smart Tagging. So every
-match is DEGRADED to look like the ATD, and a Smart Tagging file is SYNTHESISED from its restarts,
-with the defects the real file has. Both are assumptions -- the main risk of training on this data
--- and they are written down in each match's degradation.json and in the dataset README.
+  Metrica Sports sample data (github.com/metrica-sports/sample-data) -- 3 anonymised matches with
+  Metrica's corrected tracking and human event data. No possession channel: labels are DERIVED
+  FROM THE EVENTS (see labels_from_events). Metrica's own written definition of possession matches
+  CHALLENGE.md ("possession is not considered lost when an opposing player's interference does not
+  have a significant impact"), so these are the closest labels to the challenge's criterion we
+  can get: VAL_METRICA (games 1, 2) and TEST_METRICA (game 3).
 
-    python tools/build_datasets.py --verify          # download, build and check (~15-20 min, ~2.6 GB raw)
-    python tools/build_datasets.py --selftest        # the same code on fake_data/seed0, no download
+Label harmonisation. DFL's BallPossession changes hands far more often than Metrica's criterion
+(it counts a touch). Two fixed clean-ups are applied to every source -- stoppages shorter than
+1 s, and possession flickers shorter than 0.2 s right after a restart, are data artefacts -- and
+one CALIBRATED rule to IDSSE: an opponent spell shorter than touch_s that returns to the same team
+without a stoppage is a touch, not a change of possession (CHALLENGE.md: "a simple touch without
+control", "a deflection", "an aerial duel won without subsequent control"). touch_s is chosen so
+that the IDSSE TRAIN matches have as many possessions per minute of live ball as the Metrica VAL
+games -- other games only, never the challenge match. The raw labels are kept beside the
+harmonised ones (labels_raw.csv), so every conclusion can be checked on both.
 
-By default everything goes to external/ inside the repository (add `external/` to .gitignore):
-the raw XML to external/idsse_raw/ and the datasets to external/datasets/. This is public data,
-not the challenge's, so it is fine for Claude Code to read it.
+Neither source is the challenge data: both are clean tracking with player identities. Every match
+is DEGRADED to look like the challenge ATD (46 anonymous slots, ball missing on ~41% of graded
+frames, identity switches, noise) and a Smart Tagging file is SYNTHESISED from its restarts. Note
+that Metrica's corrected tracking already has no ball during stoppages (visible ~97% of live
+frames, ~0% of dead ones), while IDSSE has the ball everywhere and loses it to occlusions here.
+Which pattern the challenge ATD follows is an open question -- see the dataset README.
 
-The raw files are downloaded from figshare (the official host) or, failing that, from the Hugging
-Face mirror pysport/idsse-data. Already-downloaded files are reused: put them in --raw-dir as
-<MATCH>_meta.xml and <MATCH>_positions.xml.
+    python tools/build_datasets.py --verify          # download, build and check
+    python tools/build_datasets.py --selftest        # fake match (as IDSSE) + Metrica, no figshare needed
 
-Output (one folder; see the README.md written into it):
+Defaults: IDSSE raw XML in external/idsse_raw/, Metrica raw files in external/metrica_raw/, the
+datasets in external/datasets/ (add `external/` to .gitignore). Public data, not the challenge's:
+fine for Claude Code to read.
 
-    README.md  splits.json  summary.csv
-    matches/<MATCH>/meta.json            match facts, timeline, ground-truth statistics
-    matches/<MATCH>/labels.csv           frame,label (H/A/D/X) -- the official scorer's format
-    matches/<MATCH>/labels_control.csv   the same, touches and false stops removed (control_labels)
+Output (see the README.md written into it):
+
+    README.md  splits.json  summary.csv  label_harmonization.json
+    matches/<MATCH>/meta.json            source, timeline, label rule, ground-truth statistics
+    matches/<MATCH>/labels.csv           frame,label (H/A/D/X), harmonised -- the official scorer's format
+    matches/<MATCH>/labels_raw.csv       the labels before harmonisation
     matches/<MATCH>/truth.npz            the clean tracking, for oracle experiments and debugging
     matches/<MATCH>/seed<k>/tracking.npz ATD-like degraded tracking: 46 slots + ball
     matches/<MATCH>/seed<k>/smart_tagging.xml   synthetic, SportsCode XML like the real file
     matches/<MATCH>/seed<k>/degradation.json    parameters and the resulting statistics
 
-Positions are stored as int16 centimetres from the top-left corner (x along the pitch, y down),
--32768 meaning missing: exactly the challenge ATD's 0-1 coordinates times the pitch size.
-Use load_match() below, or tools/mtah_data.py, rather than reading the arrays by hand.
+Positions are int16 centimetres from the top-left corner (x along the pitch, y down), -32768 =
+missing: the challenge ATD's 0-1 coordinates times the pitch size. Load with load_match().
 """
 
 import argparse
@@ -90,47 +100,55 @@ FIGSHARE_URL = "https://springernature.figshare.com/ndownloader/files/{}"
 HF_TREE = "https://huggingface.co/api/datasets/pysport/idsse-data/tree/main?recursive=true"
 HF_FILE = "https://huggingface.co/datasets/pysport/idsse-data/resolve/main/{}"
 
-# Split by MATCH, never by frame. Both top-flight games are split between train and val; the five
-# Düsseldorf home games are spread over all three splits. Features are team-agnostic, so a club
-# appearing in two splits is not a leak.
+METRICA = {"METRICA1": 1, "METRICA2": 2, "METRICA3": 3}
+METRICA_URL = "https://raw.githubusercontent.com/metrica-sports/sample-data/master/data/Sample_Game_{g}/{name}"
+METRICA_FILES = {
+    1: ["Sample_Game_1_RawEventsData.csv", "Sample_Game_1_RawTrackingData_Home_Team.csv",
+        "Sample_Game_1_RawTrackingData_Away_Team.csv"],
+    2: ["Sample_Game_2_RawEventsData.csv", "Sample_Game_2_RawTrackingData_Home_Team.csv",
+        "Sample_Game_2_RawTrackingData_Away_Team.csv"],
+    3: ["Sample_Game_3_events.json", "Sample_Game_3_metadata.xml", "Sample_Game_3_tracking.txt"],
+}
+METRICA_PITCH = (105.0, 68.0)          # stated in the sample-data README
+
+# Split by MATCH, never by frame.
 DEFAULT_SPLITS = {"train": ["J03WPY", "J03WOH", "J03WQQ", "J03WN1"],
                   "val": ["J03WOY", "J03WMX"],
-                  "test": ["J03WR9"]}
+                  "test": ["J03WR9"],
+                  "val_metrica": ["METRICA1", "METRICA2"],
+                  "test_metrica": ["METRICA3"]}
 
-CITATION = ("Bassek, M., Weber, H., Rein, R., & Memmert, D. (2025). An integrated dataset of "
-            "spatiotemporal and event data in elite soccer. Scientific Data, 12. "
-            "Licensed CC BY 4.0.")
+CITATION = {
+    "idsse": ("Bassek, M., Weber, H., Rein, R., & Memmert, D. (2025). An integrated dataset of "
+              "spatiotemporal and event data in elite soccer. Scientific Data, 12. Licensed CC BY 4.0."),
+    "metrica": "Metrica Sports sample data, https://github.com/metrica-sports/sample-data",
+    "fake": "synthetic match from tools/make_fake_data.py",
+}
 
-# Degradation defaults. Targets come from DATA.md (ball visible on 59.3% of graded frames, 20.5
-# tracked objects on average, 46 slots); the rates are the same as tools/make_fake_data.py, which
-# lands on those targets.
+# Degradation. Targets from DATA.md: ball visible on 59.3% of graded frames, 20.5 tracked objects.
 DEGRADE = {
-    "ball_missing": 0.41,      # share of graded frames without a ball (DATA.md)
+    "ball_missing": 0.41,      # share of graded frames without a ball, counting any already missing
     "ball_noise_m": 0.25,
-    "ball_false_rate": 0.01,   # share of visible frames covered by a wrong ball detection
-    "air_height_m": 1.8,       # a ball above this is "in the air": harder to track
+    "ball_false_rate": 0.01,
+    "air_height_m": 1.8,
     "player_noise_m": 0.12,
-    "player_loss": 0.0025,     # per-frame chance of losing a player (x up to 2.5 in crowds)
+    "player_loss": 0.0025,
     "player_gap_s": 1.2,
     "swap_same_team": 0.02,
     "swap_cross_team": 0.004,
     "fragment": 0.0004,
     "duplicate": 0.0002,
 }
-# Smart Tagging: share of restarts of each kind that get a SET PIECES tag. The real file has 26
-# throw-ins, 12 corners, 10 goal kicks, 5 free kicks and 6 kick-offs (DATA.md); a typical match
-# has roughly 45, 10, 18, 25 and 4-8, which is where these recalls come from.
+# Smart Tagging recall per restart type, from the real file's counts (DATA.md) vs a typical match.
 TAG_RECALL = {"Throw-in": 0.55, "Corner Kick": 0.9, "Goal Kick": 0.55, "Free Kick": 0.25,
               "Kick Off (Start)": 1.0, "Kick Off (After Goal)": 1.0}
 TAG_WRONG_TEAM = 0.05
 TAG_FALSE = 0.03
 
-# Second version of the labels. DFL's BallPossession follows every touch; CHALLENGE.md says "a simple
-# touch of the ball without control" and "a deflection of a pass that does not intercept it" are not
-# a change of possession. Both thresholds are reasoned from football, never fitted to the public
-# minutes: a restart takes seconds, and one second is too short to control the ball.
-MIN_STOP_S = 1.0       # a dead run shorter than this between two live runs is not a real stoppage
-MIN_CONTROL_S = 1.0    # an opponent run shorter than this, same team on both sides, no stop, is a touch
+# Label harmonisation: fixed artefact clean-ups for every source, plus the calibrated touch rule.
+MIN_DEAD_S = 1.0                       # a real stoppage lasts seconds
+MIN_RESTART_SPELL_S = 0.2              # a flicker right after a restart is an artefact
+TOUCH_GRID = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 
 
 # ==================================================================================================
@@ -192,9 +210,31 @@ def _hf_name(match, kind):
     return hits[0]
 
 
+def fetch_metrica(match, raw_dir):
+    """Folder with the sample game's files, downloading whatever is missing (GitHub)."""
+    g = METRICA[match]
+    folder = os.path.join(raw_dir, "Sample_Game_%d" % g)
+    os.makedirs(folder, exist_ok=True)
+    for name in METRICA_FILES[g]:
+        path = os.path.join(folder, name)
+        if not (os.path.isfile(path) and os.path.getsize(path) > 1000):
+            _download(METRICA_URL.format(g=g, name=name), path)
+    return folder
+
+
 # ==================================================================================================
-# Parse DFL XML into a clean match
+# Parse IDSSE (DFL XML)
 # ==================================================================================================
+
+def timeline(period_ranges):
+    """Original frame ranges per period -> (offsets, halves, n) on our padded timeline."""
+    offsets, halves, pos = [], [], PAD_BEFORE_S * FPS
+    for i, (first, last) in enumerate(period_ranges):
+        offsets.append(pos - first)
+        halves.append((i + 1, pos, pos + last - first))
+        pos += last - first + 1 + (HALFTIME_S * FPS if i == 0 else 0)
+    return offsets, halves, pos + PAD_AFTER_S * FPS
+
 
 def parse_dfl(meta_path, positions_path, match):
     """The clean match: players and ball in metres from the top-left corner, y pointing down."""
@@ -232,18 +272,12 @@ def parse_dfl(meta_path, positions_path, match):
     L, W = pitch
 
     sections = [s for s in ("firstHalf", "secondHalf") if any(k[0] == s and k[1] == "BALL" for k in sets)]
-    ranges = {}
+    ranges = []
     for s in sections:
         ball_set = [v for k, v in sets.items() if k[0] == s and k[1] == "BALL"][0]
-        ranges[s] = (int(ball_set["N"].min()), int(ball_set["N"].max()))
-    offsets, pos = {}, PAD_BEFORE_S * FPS
-    halves = []
-    for i, s in enumerate(sections):
-        first, last = ranges[s]
-        offsets[s] = pos - first
-        halves.append((i + 1, pos, pos + last - first))
-        pos += last - first + 1 + (HALFTIME_S * FPS if i == 0 else 0)
-    n = pos + PAD_AFTER_S * FPS
+        ranges.append((int(ball_set["N"].min()), int(ball_set["N"].max())))
+    offs, halves, n = timeline(ranges)
+    offsets = dict(zip(sections, offs))
 
     people = sorted({(k[1], k[2]) for k in sets if k[1] != "BALL"})
     index = {person: i for i, person in enumerate(people)}
@@ -270,12 +304,170 @@ def parse_dfl(meta_path, positions_path, match):
     home_name = next((name for role, name in teams.values() if role == "home"), "home")
     away_name = next((name for role, name in teams.values() if role != "home"), "away")
     title, division = IDSSE.get(match, ("%s vs %s" % (home_name, away_name), "?"))
-    return make_clean(match, title, division, home_name, away_name, (L, W), halves,
-                      players, player_team, ball, status, possession)
+    clean = make_clean(match, title, division, home_name, away_name, (L, W), halves,
+                       players, player_team, ball, status, possession)
+    clean.update(source="idsse", label_rule="D where BallStatus=0, else the BallPossession team (DFL)")
+    return clean
 
+
+# ==================================================================================================
+# Parse Metrica sample games (tracking + events -> labels)
+# ==================================================================================================
+
+def labels_from_events(ev, n_frames):
+    """Per original frame, H/A/D from Metrica's human event data, following its event definitions.
+
+      stop    -> D : BALL OUT (end), SHOT out or goal (end), FAULT RECEIVED (start), BALL LOST or
+                     PASS that is forced / end of half / offside / hand ball (end)
+      restart      : SET PIECE, or a GOAL KICK pass (start) -> that team, ball alive
+      possession   : PASS, RECOVERY, SHOT, CARRY (start) -> that team; a RECOVERY while the ball is
+                     dead brings it back into play ("RECOVERY ... brings the ball back into play
+                     via a dead-ball situation that is not a SET PIECE")
+    CHALLENGE, BALL LOST and CARD do not change possession by themselves: the opponent's
+    RECOVERY or PASS that follows does, at its start frame.
+    """
+    points = []
+    for e in ev:
+        sub = e["sub"].upper()
+        if e["type"] == "SET PIECE" or ("GOAL KICK" in sub and e["type"] in ("PASS", "BALL LOST")):
+            points.append((e["start"], 0, "restart", e["team"]))
+        elif e["type"] in ("PASS", "RECOVERY", "SHOT", "CARRY"):
+            points.append((e["start"], 1, "own", e["team"]))
+        if e["type"] == "BALL OUT" or (e["type"] == "SHOT" and ("OUT" in sub or "GOAL" in sub)):
+            points.append((max(e["end"], e["start"]), 2, "stop", None))
+        elif e["type"] == "FAULT RECEIVED":
+            points.append((e["start"], 2, "stop", None))
+        elif e["type"] in ("BALL LOST", "PASS") and any(k in sub for k in ("FORCED", "END HALF", "OFFSIDE", "HAND BALL")):
+            points.append((max(e["end"], e["start"]), 2, "stop", None))
+    points.sort(key=lambda p: (p[0], p[1]))
+    lab = np.full(n_frames + 1, "D", dtype="<U1")
+    state, team, last = "D", None, 0
+    for f, _, kind, t in points:
+        f = min(max(f, 0), n_frames)
+        lab[last:f] = "D" if state == "D" else team
+        if kind == "restart":
+            state, team = "live", t
+        elif kind == "own":
+            state, team = "live", t
+        else:
+            state = "D"
+        last = f
+    lab[last:] = "D"
+    return lab
+
+
+def parse_metrica(match, folder):
+    import pandas as pd
+    g = METRICA[match]
+    L, W = METRICA_PITCH
+    if g in (1, 2):
+        base = os.path.join(folder, "Sample_Game_%d_" % g)
+        tables, players_cols = [], []
+        for t, side in ((0, "Home"), (1, "Away")):
+            df = pd.read_csv(base + "RawTrackingData_%s_Team.csv" % side, skiprows=2)
+            tables.append(df)
+            cols = list(df.columns)
+            players_cols += [(t, df.iloc[:, i].to_numpy(np.float32), df.iloc[:, i + 1].to_numpy(np.float32))
+                             for i, c in enumerate(cols) if c.startswith("Player")]
+        home = tables[0]
+        frames = home["Frame"].to_numpy(int)
+        period = home["Period"].to_numpy(int)
+        b = list(home.columns).index("Ball")
+        bx, by = home.iloc[:, b].to_numpy(np.float32), home.iloc[:, b + 1].to_numpy(np.float32)
+        ranges = [(int(frames[period == p].min()), int(frames[period == p].max())) for p in (1, 2)]
+        evdf = pd.read_csv(base + "RawEventsData.csv")
+        events = [{"team": "H" if team == "Home" else "A", "type": kind, "sub": "" if pd.isna(sub) else str(sub),
+                   "start": int(start), "end": int(end)}
+                  for team, kind, sub, start, end in zip(evdf["Team"], evdf["Type"], evdf["Subtype"],
+                                                         evdf["Start Frame"], evdf["End Frame"])]
+        home_name, away_name = "Home", "Away"
+        n_orig = int(frames.max())
+        raw_players = [(t, frames, x, y) for t, x, y in players_cols]
+        raw_ball = (frames, bx, by)
+    else:
+        meta = ET.parse(os.path.join(folder, "Sample_Game_3_metadata.xml")).getroot()
+        pc = {e.get("id"): e.get("playerId") for e in meta.iter("PlayerChannel")}
+        teams = {t.get("id"): t.findtext("Name") for t in meta.iter("Team")}
+        score = next(meta.iter("Score"), None)
+        home_id = score.get("idLocalTeam") if score is not None else list(teams)[0]
+        team_of = {p.get("id"): (0 if p.get("teamId") == home_id else 1) for p in meta.iter("Player")}
+        params = {p.findtext("Name"): p.findtext("Value") for p in meta.iter("ProviderParameter")}
+        ranges = [(int(params["first_half_start"]), int(params["first_half_end"])),
+                  (int(params["second_half_start"]), int(params["second_half_end"]))]
+        specs = []
+        for s in meta.iter("DataFormatSpecification"):
+            order = [pc[r.get("playerChannelId")] for r in s.iter("PlayerChannelRef")
+                     if r.get("playerChannelId").endswith("_x")]
+            specs.append((int(s.get("startFrame")), int(s.get("endFrame")), order))
+        ids = sorted(team_of)
+        col = {pid: i for i, pid in enumerate(ids)}
+        n_orig = ranges[-1][1]
+        px = np.full((n_orig + 1, len(ids)), np.nan, dtype=np.float32)
+        py = np.full((n_orig + 1, len(ids)), np.nan, dtype=np.float32)
+        bx = np.full(n_orig + 1, np.nan, dtype=np.float32)
+        by = np.full(n_orig + 1, np.nan, dtype=np.float32)
+        spec_i = 0
+        with open(os.path.join(folder, "Sample_Game_3_tracking.txt")) as handle:
+            for line in handle:
+                head, body, ball_txt = line.rstrip("\r\n").split(":")
+                f = int(head)
+                while specs[spec_i][1] < f:
+                    spec_i += 1
+                order = specs[spec_i][2]
+                for k, grp in enumerate(body.split(";")):
+                    x, y = grp.split(",")[:2]
+                    if x != "NaN":
+                        c = col[order[k]]
+                        px[f, c], py[f, c] = float(x), float(y)
+                x, y = ball_txt.split(",")[:2]
+                if x != "NaN":
+                    bx[f], by[f] = float(x), float(y)
+        frames = np.arange(n_orig + 1)
+        raw_players = [(team_of[pid], frames, px[:, col[pid]], py[:, col[pid]]) for pid in ids]
+        raw_ball = (frames, bx, by)
+        with open(os.path.join(folder, "Sample_Game_3_events.json"), encoding="utf-8") as handle:
+            data = json.load(handle)["data"]
+        events = []
+        for e in data:
+            subs = e.get("subtypes")
+            subs = [subs] if isinstance(subs, dict) else (subs or [])
+            events.append({"team": "H" if e["team"]["id"] == home_id else "A", "type": e["type"]["name"],
+                           "sub": "-".join(s["name"] for s in subs), "start": int(e["start"]["frame"]),
+                           "end": int(e["end"]["frame"] if e["end"]["frame"] is not None else e["start"]["frame"])})
+        home_name, away_name = teams[home_id], [v for k, v in teams.items() if k != home_id][0]
+
+    lab_orig = labels_from_events(events, n_orig)
+    offsets, halves, n = timeline(ranges)
+    P = len(raw_players)
+    players = np.full((n, P, 2), np.nan, dtype=np.float32)
+    ball = np.full((n, 3), np.nan, dtype=np.float32)
+    status = np.full(n, -1, dtype=np.int8)
+    possession = np.full(n, -1, dtype=np.int8)
+    for (first, last), off in zip(ranges, offsets):
+        orig = np.arange(first, last + 1)
+        rows = orig + off
+        lab = lab_orig[orig]
+        status[rows] = np.where(lab == "D", 0, 1)
+        possession[rows] = np.where(lab == "H", 0, np.where(lab == "A", 1, -1))
+        f_ball, x, y = raw_ball
+        sel = (f_ball >= first) & (f_ball <= last)
+        ball[f_ball[sel] + off, 0], ball[f_ball[sel] + off, 1] = x[sel] * L, y[sel] * W
+        for k, (_, f_pl, x, y) in enumerate(raw_players):
+            sel = (f_pl >= first) & (f_pl <= last)
+            players[f_pl[sel] + off, k, 0], players[f_pl[sel] + off, k, 1] = x[sel] * L, y[sel] * W
+    player_team = np.array([t for t, *_ in raw_players], dtype=np.int8)
+    clean = make_clean(match, "Metrica Sports sample game %d (anonymised)" % g, "?", home_name, away_name,
+                       (L, W), halves, players, player_team, ball, status, possession)
+    clean.update(source="metrica", label_rule="derived from Metrica's human event data (labels_from_events)")
+    return clean
+
+
+# ==================================================================================================
+# The clean match, labels and harmonisation
+# ==================================================================================================
 
 def make_clean(match, title, division, home, away, pitch, halves, players, player_team, ball, status, possession):
-    """Labels from BallStatus/BallPossession, and sides that swap at half-time like a real camera."""
+    """Labels from status/possession, and sides that swap at half-time like a real camera."""
     L, W = pitch
     n = len(ball)
     graded = np.zeros(n, dtype=bool)
@@ -309,40 +501,8 @@ def make_clean(match, title, division, home, away, pitch, halves, players, playe
     return {"match": match, "title": title, "division": division, "home": home, "away": away,
             "pitch": (float(L), float(W)), "halves": [tuple(int(v) for v in h) for h in halves], "n": int(n),
             "players": players, "player_team": player_team, "ball": ball, "status": status,
-            "possession": possession, "labels": labels, "graded": graded, "flipped_second_half": flipped}
-
-
-def _runs(seg):
-    cut = np.flatnonzero(seg[1:] != seg[:-1]) + 1
-    bounds = np.concatenate(([0], cut, [len(seg)]))
-    return [(int(p), int(q), seg[p]) for p, q in zip(bounds[:-1], bounds[1:])]
-
-
-def control_labels(labels, halves):
-    """The labels with CHALLENGE.md's notion of control applied: false stops removed first (they
-    would hide a touch), then touches merged into the possession around them. H H D D H H stays
-    two possessions whenever the stop is real. Returns (labels, counts of each change)."""
-    out = labels.copy()
-    counts = {"false_stops": 0, "touches": 0}
-    for _, a, b in halves:
-        seg = out[a:b + 1]
-        runs = _runs(seg)
-        for i in range(1, len(runs) - 1):
-            p, q, v = runs[i]
-            if v == "D" and q - p < MIN_STOP_S * FPS and runs[i - 1][2] in "HA" and runs[i + 1][2] in "HA":
-                seg[p:q] = runs[i - 1][2]
-                counts["false_stops"] += 1
-        while True:                        # one at a time, shortest first: merging can create new ones
-            runs = _runs(seg)
-            touches = [(q - p, p, q, runs[i - 1][2]) for i, (p, q, v) in enumerate(runs[1:-1], 1)
-                       if v in "HA" and q - p < MIN_CONTROL_S * FPS
-                       and runs[i - 1][2] in "HA" and runs[i - 1][2] == runs[i + 1][2]]
-            if not touches:
-                break
-            _, p, q, team = min(touches)
-            seg[p:q] = team
-            counts["touches"] += 1
-    return out, counts
+            "possession": possession, "labels": labels, "labels_raw": labels.copy(), "graded": graded,
+            "flipped_second_half": flipped}
 
 
 class _quiet:
@@ -354,6 +514,102 @@ class _quiet:
 
     def __exit__(self, *exc):
         return self._w.__exit__(*exc)
+
+
+def _runs(seg):
+    cut = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+    bounds = np.concatenate(([0], cut, [len(seg)]))
+    return [[int(p), int(q), seg[p]] for p, q in zip(bounds[:-1], bounds[1:])]
+
+
+def clean_artefacts(labels, halves):
+    """Fixed clean-ups, every source: stoppages < MIN_DEAD_S inside a half are not stoppages (the
+    previous team keeps the ball), and a team spell < MIN_RESTART_SPELL_S right after a stoppage
+    is a flicker (the next team had it from the restart)."""
+    out = labels.copy()
+    for _, a, b in halves:
+        seg = out[a:b + 1]
+        runs = _runs(seg)
+        for i in range(1, len(runs) - 1):
+            p, q, v = runs[i]
+            if v == "D" and q - p < MIN_DEAD_S * FPS and runs[i - 1][2] in ("H", "A") and runs[i + 1][2] in ("H", "A"):
+                seg[p:q] = runs[i - 1][2]
+        runs = _runs(seg)
+        for i in range(1, len(runs) - 1):
+            p, q, v = runs[i]
+            if v in ("H", "A") and runs[i - 1][2] == "D" and runs[i + 1][2] in ("H", "A") \
+                    and q - p < MIN_RESTART_SPELL_S * FPS:
+                seg[p:q] = runs[i + 1][2]
+    return out
+
+
+def merge_touches(labels, halves, touch_s):
+    """CHALLENGE.md: a touch, a deflection or a lost aerial duel is not a change of possession.
+    Inside each live stretch, a team spell shorter than touch_s whose neighbours both belong to the
+    other team -- or that ends the stretch right after the other team's spell -- goes back to that
+    team. The first spell after a restart is never touched: "there is always a clear possessor".
+    Shortest spells first, until none qualifies."""
+    if touch_s <= 0:
+        return labels.copy()
+    limit = touch_s * FPS
+    out = labels.copy()
+    for _, a, b in halves:
+        seg = out[a:b + 1]
+        for p0, q0, v0 in _runs(seg == "D"):
+            if v0:
+                continue
+            runs = _runs(seg[p0:q0])
+            while len(runs) > 1:
+                best = None
+                for i in range(1, len(runs)):
+                    p, q, v = runs[i]
+                    if q - p >= limit:
+                        continue
+                    last = i == len(runs) - 1
+                    if last or runs[i + 1][2] == runs[i - 1][2]:
+                        if best is None or q - p < runs[best][1] - runs[best][0]:
+                            best = i
+                if best is None:
+                    break
+                p, q, _ = runs[best]
+                team = runs[best - 1][2]
+                seg[p0 + p:p0 + q] = team
+                runs = _runs(seg[p0:q0])
+    return out
+
+
+def possession_stats(labels, halves):
+    lengths, per_half = [], []
+    for _, a, b in halves:
+        runs = _runs(labels[a:b + 1])
+        team_runs = [q - p for p, q, v in runs if v in ("H", "A")]
+        per_half.append(len(team_runs))
+        lengths += team_runs
+    g = np.concatenate([labels[a:b + 1] for _, a, b in halves])
+    minutes = len(g) / FPS / 60.0
+    alive_min = np.isin(g, ("H", "A")).sum() / FPS / 60.0
+    secs = np.array(lengths) / FPS if lengths else np.zeros(1)
+    return {"possessions": int(sum(per_half)), "per_half": per_half,
+            "mean_possession_s": round(float(secs.mean()), 2), "median_possession_s": round(float(np.median(secs)), 2),
+            "share_under_1s": round(float(np.mean(secs < 1.0)), 4),
+            "possessions_per_min": round(sum(per_half) / minutes, 2),
+            "possessions_per_alive_min": round(sum(per_half) / alive_min, 2) if alive_min else 0.0,
+            "share": {k: round(float(np.mean(g == k)), 4) for k in ("H", "A", "D")},
+            "graded_minutes": round(minutes, 1)}
+
+
+def calibrate_touch(train, reference):
+    """touch_s whose harmonised TRAIN labels have the reference's possessions per live minute."""
+    target = float(np.mean([possession_stats(c["labels"], c["halves"])["possessions_per_alive_min"] for c in reference]))
+    table = []
+    for t in TOUCH_GRID:
+        stats = [possession_stats(merge_touches(c["labels"], c["halves"], t), c["halves"]) for c in train]
+        table.append({"touch_s": t,
+                      "possessions_per_alive_min": round(float(np.mean([s["possessions_per_alive_min"] for s in stats])), 2),
+                      "mean_possession_s": round(float(np.mean([s["mean_possession_s"] for s in stats])), 2),
+                      "share_under_1s": round(float(np.mean([s["share_under_1s"] for s in stats])), 4)})
+    best = min(table, key=lambda r: (abs(r["possessions_per_alive_min"] - target), r["touch_s"]))
+    return best["touch_s"], target, table
 
 
 # ==================================================================================================
@@ -372,23 +628,29 @@ def rotate(vec, angle):
 
 def degrade_ball(clean, rng, prm):
     """Hide the ball where an automatic tracker loses it -- crowds, air, speed, off the pitch --
-    add noise and a few wrong detections. Driven by geometry only, never by the labels."""
+    add noise and a few wrong detections. Geometry only, never the labels. If the source already
+    lacks the ball on some frames (Metrica: during stoppages), only the remainder is hidden."""
     ball, players, graded = clean["ball"].astype(np.float64), clean["players"], clean["graded"]
     L, W = clean["pitch"]
     n = len(ball)
     present = ~np.isnan(ball[:, 0])
     crowd = np.zeros(n)
     for s in range(0, n, 20000):
-        d = np.linalg.norm(players[s:s + 20000] - ball[s:s + 20000, None, :2], axis=2)
-        crowd[s:s + 20000] = np.nansum(d < 4.0, axis=1)
+        with np.errstate(invalid="ignore"):
+            d = np.linalg.norm(players[s:s + 20000] - ball[s:s + 20000, None, :2], axis=2)
+            crowd[s:s + 20000] = np.nansum(d < 4.0, axis=1)
     speed = np.zeros(n)
     speed[1:] = np.nan_to_num(np.linalg.norm(np.diff(ball[:, :2], axis=0), axis=1) * FPS)
     air = np.nan_to_num(ball[:, 2]) > prm["air_height_m"]
     with np.errstate(invalid="ignore"):
         off = present & ((ball[:, 0] < 0) | (ball[:, 0] > L) | (ball[:, 1] < 0) | (ball[:, 1] > W))
     score = 0.45 * crowd + 1.4 * air + 0.04 * np.minimum(speed, 30) + 3.0 * off + smooth_noise(rng, n, 21)
-    threshold = np.quantile(score[graded & present], 1.0 - prm["ball_missing"])
-    missing = ~present | (score > threshold)
+    already = float(np.mean(~present[graded]))
+    extra = max(0.0, prm["ball_missing"] - already) / max(1e-9, 1.0 - already)
+    hide = np.zeros(n, dtype=bool)
+    if extra > 0:
+        hide = score > np.quantile(score[graded & present], 1.0 - extra)
+    missing = ~present | hide
     missing |= present & ~graded & (rng.random(n) < 0.8)
 
     out = ball[:, :2] + rng.normal(0, prm["ball_noise_m"], (n, 2))
@@ -397,11 +659,11 @@ def degrade_ball(clean, rng, prm):
         end = min(start + int(rng.integers(5, 26)), n)
         offset = rotate(np.array([1.0, 0.0]), rng.uniform(0, 2 * math.pi)) * rng.uniform(6, 30)
         out[start:end] = ball[start, :2] + offset + rng.normal(0, 0.2, (end - start, 2))
-        missing[start:end] = False
+        missing[start:end] = np.isnan(out[start:end, 0])
     out[missing] = np.nan
     out[:, 0] = np.clip(out[:, 0], -0.05 * L, 1.05 * L)
     out[:, 1] = np.clip(out[:, 1], -0.05 * W, 1.05 * W)
-    return out.astype(np.float32)
+    return out.astype(np.float32), already
 
 
 def degrade_players(clean, rng, prm):
@@ -493,7 +755,8 @@ def restarts_of(clean):
         for c in change:
             dead_len = c - (np.flatnonzero(seg[:c] != "D")[-1] + 1 if np.any(seg[:c] != "D") else 0)
             f = a + int(c)
-            x, y = ball[f, 0], ball[f, 1]
+            seen = np.flatnonzero(~np.isnan(ball[f:f + FPS, 0]))         # first sighting within 1 s
+            x, y = (ball[f + seen[0], 0], ball[f + seen[0], 1]) if len(seen) else (math.nan, math.nan)
             if math.isnan(x):
                 kind = "Free Kick"
             elif math.hypot(x - L / 2, y - W / 2) < 3.0:
@@ -560,49 +823,28 @@ def from_cm(a):
     return out
 
 
-def possession_stats(labels, halves):
-    lengths, per_half = [], []
-    for _, a, b in halves:
-        seg = labels[a:b + 1]
-        cut = np.flatnonzero(seg[1:] != seg[:-1]) + 1
-        bounds = np.concatenate(([0], cut, [len(seg)]))
-        runs = [(int(q - p), seg[p]) for p, q in zip(bounds[:-1], bounds[1:])]
-        team_runs = [r for r, v in runs if v in ("H", "A")]
-        per_half.append(len(team_runs))
-        lengths += team_runs
-    g = np.concatenate([labels[a:b + 1] for _, a, b in halves])
-    minutes = len(g) / FPS / 60.0
-    live_minutes = np.sum(np.isin(g, ("H", "A"))) / FPS / 60.0
-    return {"possessions": int(sum(per_half)), "per_half": per_half,
-            "mean_possession_s": round(float(np.mean(lengths)) / FPS, 2) if lengths else 0.0,
-            "possessions_per_min": round(sum(per_half) / minutes, 2),
-            "possessions_per_live_min": round(sum(per_half) / live_minutes, 2) if live_minutes else 0.0,
-            "short_possessions_under_1s": int(sum(n < FPS for n in lengths)),
-            "share": {k: round(float(np.mean(g == k)), 4) for k in ("H", "A", "D")},
-            "graded_minutes": round(minutes, 1)}
+def _write_labels(path, labels):
+    with open(path, "w", newline="\n") as handle:
+        handle.write("frame,label\n")
+        handle.writelines("%d,%s\n" % (f, v) for f, v in enumerate(labels.tolist()))
 
 
-def write_match(clean, out_dir, seeds, prm):
+def write_match(clean, out_dir, seeds, prm, harmonization):
     folder = os.path.join(out_dir, "matches", clean["match"])
     os.makedirs(folder, exist_ok=True)
-    control, changes = control_labels(clean["labels"], clean["halves"])
-    for name, labels in (("labels.csv", clean["labels"]), ("labels_control.csv", control)):
-        with open(os.path.join(folder, name), "w", newline="\n") as handle:
-            handle.write("frame,label\n")
-            handle.writelines("%d,%s\n" % (f, v) for f, v in enumerate(labels.tolist()))
+    _write_labels(os.path.join(folder, "labels.csv"), clean["labels"])
+    _write_labels(os.path.join(folder, "labels_raw.csv"), clean["labels_raw"])
     np.savez_compressed(os.path.join(folder, "truth.npz"), players_cm=to_cm(clean["players"]),
                         player_team=clean["player_team"], ball_cm=to_cm(clean["ball"]),
                         ball_status=clean["status"], ball_possession=clean["possession"])
     gt = possession_stats(clean["labels"], clean["halves"])
+    gt_raw = possession_stats(clean["labels_raw"], clean["halves"])
     meta = {"match": clean["match"], "title": clean["title"], "division": clean["division"],
-            "home": clean["home"], "away": clean["away"], "source": "IDSSE (DFL position data)",
-            "citation": CITATION, "fps": FPS, "n_frames": clean["n"], "pitch_m": list(clean["pitch"]),
+            "home": clean["home"], "away": clean["away"], "source": clean["source"],
+            "citation": CITATION[clean["source"]], "fps": FPS, "n_frames": clean["n"], "pitch_m": list(clean["pitch"]),
             "halves": [list(h) for h in clean["halves"]], "flipped_second_half": clean["flipped_second_half"],
-            "labels": "D where BallStatus=0, else the BallPossession team; X outside the halves",
-            "labels_control": "labels.csv with stops under %g s removed, then opponent runs under %g s "
-                              "between two runs of the same team merged into them" % (MIN_STOP_S, MIN_CONTROL_S),
-            "ground_truth": gt, "ground_truth_control": dict(possession_stats(control, clean["halves"]), changes=changes),
-            "seeds": list(seeds)}
+            "labels": clean["label_rule"] + "; X outside the halves",
+            "harmonization": harmonization, "ground_truth": gt, "ground_truth_raw": gt_raw, "seeds": list(seeds)}
     with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2, ensure_ascii=False)
 
@@ -610,7 +852,7 @@ def write_match(clean, out_dir, seeds, prm):
     for seed in seeds:
         rng = np.random.default_rng([seed, int.from_bytes(clean["match"].encode(), "little") % (2 ** 32)])
         t0 = time.time()
-        ball = degrade_ball(clean, rng, prm)
+        ball, already = degrade_ball(clean, rng, prm)
         slots, slot_team = degrade_players(clean, rng, prm)
         tags, n_tags = synth_tagging(clean, rng)
         sub = os.path.join(folder, "seed%d" % seed)
@@ -620,7 +862,12 @@ def write_match(clean, out_dir, seeds, prm):
         with open(os.path.join(sub, "smart_tagging.xml"), "w", encoding="utf-8") as handle:
             handle.write(tags)
         g = clean["graded"]
+        alive = g & np.isin(clean["labels"], ("H", "A"))
+        dead = g & (clean["labels"] == "D")
         stats = {"ball_visible_graded": round(float(np.mean(~np.isnan(ball[g, 0]))), 4),
+                 "ball_visible_live": round(float(np.mean(~np.isnan(ball[alive, 0]))), 4),
+                 "ball_visible_dead": round(float(np.mean(~np.isnan(ball[dead, 0]))), 4),
+                 "ball_missing_in_source_graded": round(already, 4),
                  "mean_tracked_objects_graded": round(float(np.mean(np.sum(~np.isnan(slots[g, :, 0]), axis=1))), 2),
                  "smart_tagging_instances": n_tags,
                  "targets_from_DATA_md": {"ball_visible_graded": 0.593, "mean_tracked_objects_graded": 20.5}}
@@ -628,23 +875,24 @@ def write_match(clean, out_dir, seeds, prm):
             json.dump({"seed": seed, "parameters": prm, "tag_recall": TAG_RECALL, "tag_wrong_team": TAG_WRONG_TEAM,
                        "tag_false": TAG_FALSE, "stats": stats}, handle, indent=2)
         rows.append(dict(stats, seed=seed))
-        print("    seed %d: ball visible %.1f%%, %.1f objects, %d tags   (%.0f s)" % (
-            seed, 100 * stats["ball_visible_graded"], stats["mean_tracked_objects_graded"], n_tags, time.time() - t0))
+        print("    seed %d: ball visible %.1f%% (live %.1f%%, dead %.1f%%), %.1f objects, %d tags   (%.0f s)" % (
+            seed, 100 * stats["ball_visible_graded"], 100 * stats["ball_visible_live"], 100 * stats["ball_visible_dead"],
+            stats["mean_tracked_objects_graded"], n_tags, time.time() - t0))
     return meta, rows
 
 
-def load_match(dataset_dir, match, seed=0):
+def load_match(dataset_dir, match, seed=0, labels="harmonized"):
     """Everything a pipeline needs for one match, in the same units as the challenge loader:
-    metres from the top-left corner, frames on the match's own timeline. Both label versions are
-    returned: an idea is only kept if it wins on both."""
+    metres from the top-left corner, frames on the match's own timeline. labels: 'harmonized'
+    (labels.csv, the default) or 'raw' (labels_raw.csv)."""
     folder = os.path.join(dataset_dir, "matches", match)
     with open(os.path.join(folder, "meta.json"), encoding="utf-8") as handle:
         meta = json.load(handle)
     track = np.load(os.path.join(folder, "seed%d" % seed, "tracking.npz"))
-    labels, control = (np.loadtxt(os.path.join(folder, name), delimiter=",", skiprows=1, dtype=str)[:, 1]
-                       for name in ("labels.csv", "labels_control.csv"))
+    name = "labels.csv" if labels == "harmonized" else "labels_raw.csv"
+    lab = np.loadtxt(os.path.join(folder, name), delimiter=",", skiprows=1, dtype=str)[:, 1]
     return {"meta": meta, "players": from_cm(track["slots_cm"]), "slot_team": track["slot_team"],
-            "ball": from_cm(track["ball_cm"]), "labels": labels, "labels_control": control,
+            "ball": from_cm(track["ball_cm"]), "labels": lab,
             "smart_tagging": os.path.join(folder, "seed%d" % seed, "smart_tagging.xml"),
             "truth": os.path.join(folder, "truth.npz")}
 
@@ -657,50 +905,51 @@ def verify(out_dir, splits):
     import possession_metrics as pm
     from baseline import smooth
 
-    windows, official = (0, 25, 50, 125), [50, 125, 25, 0]
-    result = {}
-    for version in ("labels", "labels_control"):
-        print("\nverify (%s): nearest-player baselines, official scorer, per match" % version)
-        table = []
-        for split, items in splits.items():
-            for match, seed in items:
-                m = load_match(out_dir, match, seed)
-                gt = pm.label_codes(m[version])
-                row = {"split": split, "match": match, "seed": seed}
-                for w in windows:
-                    row["w%d" % w] = pm.evaluate(gt, pm.label_codes(smooth(_nearest_codes(m), w)))["spell_f1_mean"]
-                table.append(row)
-                print("  %-5s %s s%d   raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (
-                    split, match, seed, row["w0"], row["w25"], row["w50"], row["w125"]))
-        mean = {w: float(np.mean([r["w%d" % w] for r in table])) for w in windows}
-        order = sorted(mean, key=lambda w: -mean[w])
-        print("  mean        raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f" % (
-            mean[0], mean[25], mean[50], mean[125]))
-        print("  ordering on these datasets: %s" % " > ".join("smooth%d" % w if w else "raw" for w in order))
-        print("  ordering on the real match: smooth50 > smooth125 > smooth25 > raw  -> %s" % (
-            "SAME: the datasets rank methods like the real match" if order == official else
-            "DIFFERENT: treat conclusions drawn on these datasets with caution"))
-        result[version] = (table, mean, order == official)
-    return result
-
-
-def _nearest_codes(m):
-    """The official baseline's raw answer: the team of the slot nearest to the ball."""
-    players, ball, team = m["players"], m["ball"], m["slot_team"]
-    codes = np.full(len(ball), -1, dtype=np.int8)
-    seen = np.flatnonzero(~np.isnan(ball[:, 0]))
-    for s in range(0, len(seen), 20000):
-        idx = seen[s:s + 20000]
-        d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
-        d = np.where(np.isnan(d), np.inf, d)
-        k = np.argmin(d, axis=1)
-        ok = np.isfinite(d[np.arange(len(idx)), k])
-        codes[idx[ok]] = team[k[ok]]
-    return codes
+    windows, versions = (0, 25, 50, 125), ("harmonized", "raw")
+    print("\nverify: nearest-player baselines, official scorer, per match (harmonised | raw labels)")
+    rows = []
+    for split, items in splits.items():
+        for match, seed in items:
+            m = load_match(out_dir, match, seed)
+            raw = np.loadtxt(os.path.join(out_dir, "matches", match, "labels_raw.csv"), delimiter=",",
+                             skiprows=1, dtype=str)[:, 1]
+            players, ball, team = m["players"], m["ball"], m["slot_team"]
+            codes = np.full(len(ball), -1, dtype=np.int8)
+            seen = np.flatnonzero(~np.isnan(ball[:, 0]))
+            for s in range(0, len(seen), 20000):
+                idx = seen[s:s + 20000]
+                d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
+                d = np.where(np.isnan(d), np.inf, d)
+                k = np.argmin(d, axis=1)
+                ok = np.isfinite(d[np.arange(len(idx)), k])
+                codes[idx[ok]] = team[k[ok]]
+            gts = {"harmonized": pm.label_codes(m["labels"]), "raw": pm.label_codes(raw)}
+            row = {"split": split, "match": match, "seed": seed, "source": m["meta"]["source"]}
+            for w in windows:
+                pred = pm.label_codes(smooth(codes, w))
+                for v in versions:
+                    row[v, w] = pm.evaluate(gts[v], pred)["spell_f1_mean"]
+            rows.append(row)
+            print("  %-12s %-8s s%d   %s" % (split, match, seed, "   ".join(
+                "%s %.3f | %.3f" % ("smooth%d" % w if w else "raw", row["harmonized", w], row["raw", w]) for w in windows)))
+    official = [50, 125, 25, 0]
+    groups = {}
+    for v in versions:
+        groups[v] = {}
+        for source in sorted({r["source"] for r in rows}):
+            sel = [r for r in rows if r["source"] == source]
+            mean = {w: float(np.mean([r[v, w] for r in sel])) for w in windows}
+            order = sorted(mean, key=lambda w: -mean[w])
+            groups[v][source] = {"mean": mean, "order": order, "same": order == official}
+            print("  %-10s %-8s mean   raw %.3f   smooth25 %.3f   smooth50 %.3f   smooth125 %.3f   order: %s  (%s)" % (
+                v, source, mean[0], mean[25], mean[50], mean[125],
+                " > ".join("smooth%d" % w if w else "raw" for w in order),
+                "same as the real match" if order == official else "real match: smooth50 > smooth125 > smooth25 > raw"))
+    return groups
 
 
 # ==================================================================================================
-# Self-test without downloading: the fake match, pushed through the same code path
+# Self-test source: the fake match
 # ==================================================================================================
 
 def clean_from_fake(truth_path):
@@ -712,9 +961,11 @@ def clean_from_fake(truth_path):
     possession = np.where(lab <= 1, lab, -1).astype(np.int8)
     ball = np.concatenate([t["ball"] * np.array([L, W]), np.where(t["ball_in_air"], 3.0, 0.1)[:, None]], axis=1)
     halves = [tuple(int(v) for v in h) for h in games.half_video_blocks(games.GAME)]
-    return make_clean("FAKE0", "synthetic match (tools/make_fake_data.py)", "synthetic", "Home", "Away", (L, W),
-                      halves, (t["players"] * np.array([L, W])).astype(np.float32), t["player_team"],
-                      ball.astype(np.float32), status, possession)
+    clean = make_clean("FAKE0", "synthetic match (tools/make_fake_data.py)", "synthetic", "Home", "Away", (L, W),
+                       halves, (t["players"] * np.array([L, W])).astype(np.float32), t["player_team"],
+                       ball.astype(np.float32), status, possession)
+    clean.update(source="fake", label_rule="the simulator's own labels")
+    return clean
 
 
 # ==================================================================================================
@@ -725,125 +976,134 @@ README = """# Datasets para More than a Hack 2027 (fase 1)
 
 Generado por `tools/build_datasets.py` el {date}. Semillas de degradación: {seeds}.
 
-## Fuente y licencia
-Partidos del dataset **IDSSE**: {citation}
-Datos de posición de la DFL a 25 fps, con `BallStatus` (balón vivo/muerto) y `BallPossession`
-(equipo) en cada frame, derivados de tracking corregido. Es la misma definición que la verdad del
-reto (CHALLENGE.md). Uso confirmado por los organizadores en el issue #16 del repo oficial, con
-tres condiciones: citar el dataset (aquí, en el README del repo y en el documento técnico); elegir
-todos los hiperparámetros y umbrales en estos partidos u otros, nunca en el del reto; y usar los
-5 minutos públicos solo para comprobar el pipeline.
+## Fuentes, licencias y cita
+- **IDSSE** (entrenamiento, validación y test): {cite_idsse}
+  Datos de posición de la DFL a 25 fps con `BallStatus` y `BallPossession` en cada frame.
+  Uso confirmado por los organizadores en el issue #16 del repo oficial, con tres condiciones:
+  citarlo (aquí, en el README del repo y en el documento técnico); elegir todos los
+  hiperparámetros y umbrales en estos partidos u otros, nunca en el del reto; y usar los 5 minutos
+  públicos solo para comprobar el pipeline.
+- **Metrica Sports sample data** (validación y test «de criterio»): {cite_metrica}
+  Tracking corregido de Metrica y sus eventos etiquetados a mano. Su repositorio pide reconocer la
+  fuente. **No trae etiquetas de posesión**: las derivamos de los eventos (`labels_from_events`),
+  siguiendo la definición de posesión del PDF de Metrica, que coincide con la de CHALLENGE.md
+  («la posesión no se pierde cuando la interferencia del rival no tiene un impacto significativo»).
+  Son lo más parecido al criterio del reto que tenemos, pero son una aproximación: el reto deriva
+  su verdad del tracking corregido, no de eventos.
 
 ## Particiones (por partido, nunca por frame)
 {split_table}
 
-- **train**: para entrenar el modelo. Con varias semillas, cada partido aparece con varias
-  degradaciones distintas (aumento de datos).
-- **val**: para elegir señales, hiperparámetros y umbrales del decodificador.
-- **test**: no se toca hasta tener un candidato final; da una estimación sin sesgo.
-- **comprobación** (no está aquí): los 5 minutos públicos del partido del reto, que se ejecutan
-  en local y sirven solo para ver que el pipeline funciona. Nunca para elegir.
+- **train**: para entrenar.
+- **val**: para elegir señales e hiperparámetros con datos abundantes.
+- **val_metrica**: la validación que manda cuando el criterio de posesión importa (decodificador,
+  duraciones). Si una idea gana en val pero pierde aquí, desconfiad de ella.
+- **test** y **test_metrica**: no se miran hasta tener un candidato final.
+- **comprobación** (no está aquí): los 5 minutos públicos del reto, en local, solo para ver que el
+  pipeline funciona.
+
+## Armonización de etiquetas
+{harmonization_text}
 
 ## Qué hay en cada partido
 ```
-matches/<PARTIDO>/meta.json              equipos, partes (frames), campo, estadísticas de la verdad
-matches/<PARTIDO>/labels.csv             frame,label (H/A/D/X): el formato del scorer oficial
-matches/<PARTIDO>/labels_control.csv     lo mismo, con la regla de control de CHALLENGE.md (abajo)
-matches/<PARTIDO>/truth.npz             tracking limpio (para experimentos de oráculo)
+matches/<PARTIDO>/meta.json              fuente, partes, regla de etiquetado, estadísticas
+matches/<PARTIDO>/labels.csv             frame,label (H/A/D/X) armonizadas: las que se usan por defecto
+matches/<PARTIDO>/labels_raw.csv         las etiquetas originales, para comprobar que una conclusión se sostiene
+matches/<PARTIDO>/truth.npz              tracking limpio (para experimentos de oráculo)
 matches/<PARTIDO>/seed<k>/tracking.npz   tracking degradado tipo ATD: 46 slots + balón
 matches/<PARTIDO>/seed<k>/smart_tagging.xml   Smart Tagging sintético (formato SportsCode)
 matches/<PARTIDO>/seed<k>/degradation.json    parámetros y estadísticas de la degradación
 ```
-Posiciones en centímetros (int16) desde la esquina superior izquierda (x a lo largo del campo,
-y hacia abajo), con -32768 = sin dato. Es lo mismo que las coordenadas 0–1 del ATD multiplicadas
-por el tamaño del campo. Cárgalo con `load_match()` de `tools/build_datasets.py`.
+Posiciones en centímetros (int16) desde la esquina superior izquierda (x a lo largo del campo, y
+hacia abajo), -32768 = sin dato: las coordenadas 0–1 del ATD por el tamaño del campo. Cárgalo con
+`load_match()` de `tools/build_datasets.py` (`labels="raw"` para las originales).
 
-La línea de tiempo de cada partido: {pad_before} s sin juego, la 1ª parte, {halftime} s de
-descanso, la 2ª parte y {pad_after} s sin juego. Fuera de las partes la verdad es X y no se puntúa.
-
-## Dos versiones de las etiquetas
-- `labels.csv`: la verdad de la DFL tal cual. `D` donde `BallStatus = 0`; si no, el equipo de
-  `BallPossession`. La DFL cambia de equipo con cualquier toque: un 9–17% de sus posesiones dura
-  menos de 1 s, y muchas son un tramo corto del rival en medio de una posesión, sin parada.
-- `labels_control.csv`: la misma verdad con dos reglas sacadas del texto de CHALLENGE.md («un toque
-  sin control» y «un desvío de un pase que no lo intercepta» no son cambio de posesión), aplicadas
-  en este orden:
-  1. **Falsas paradas**: una `D` de menos de {min_stop} s entre dos tramos con balón vivo no es una
-     parada real (una reanudación tarda segundos) y pasa al equipo de antes. En IDSSE no hay
-     ninguna: la `D` más corta dura varios segundos.
-  2. **Toques**: un tramo del rival de menos de {min_control} s, con el mismo equipo antes y después
-     y sin parada en medio, se une a esa posesión. Una parada real no se toca: `H H D D H H`
-     siguen siendo dos posesiones.
-
-Los umbrales se razonan desde el fútbol y no se ajustan a nada; en particular, nunca a los 5
-minutos públicos. **Una idea solo entra si gana con las dos versiones**: así no dependemos de
-haber acertado con la transformación. `load_match()` devuelve las dos (`labels` y
-`labels_control`), y `meta.json` guarda las estadísticas de cada una y cuántos cambios hizo cada
-regla.
+Línea de tiempo de cada partido: {pad_before} s sin juego, la 1ª parte, {halftime} s de descanso,
+la 2ª parte y {pad_after} s sin juego. Fuera de las partes la verdad es X.
 
 ## En qué se parece y en qué no al partido del reto
-Parecido, por construcción:
-- 25 fps, 46 slots anónimos (23 por equipo), sin identidades.
-- Balón ausente en ~41% de los frames evaluados, sobre todo con mucha gente cerca, con el balón
-  en el aire o muy rápido y fuera del campo (FAQ.md).
-- Jugadores que se pierden y vuelven en otro slot, intercambios entre compañeros (y alguna vez
-  entre rivales), duplicados y ruido; unos 20,5 objetos de media (DATA.md).
-- Los equipos cambian de lado en el descanso, como en la cámara real.
-- Smart Tagging solo con SET PIECES, con la misma proporción por tipo que el archivo real, saques
-  de banda con `Team = N/A`, algún equipo equivocado y algún tag falso.
+Parecido, por construcción: 25 fps; 46 slots anónimos; balón ausente en ~41% de los frames
+evaluados; jugadores que se pierden y vuelven en otro slot, intercambios, duplicados y ruido
+(~20,5 objetos de media); cambio de lado en el descanso; Smart Tagging solo con SET PIECES, con la
+proporción por tipo del archivo real y `Team = N/A` en los saques de banda.
 
 Distinto, y conviene recordarlo:
-- La degradación es un modelo nuestro, no el comportamiento real del tracker de Metrica.
-- No hay fases tácticas en el Smart Tagging sintético (BUILD UP, PROGRESSION…): no sabemos con
-  qué calidad las etiqueta Metrica, y simularlas metería supuestos nuestros en el modelo.
-- No hay vídeo ni homografía.
-- La definición de posesión de la DFL puede no coincidir al 100% con la del tracking corregido
-  de Metrica (ver «Dos versiones de las etiquetas»). Compara `ground_truth` de cada `meta.json`
-  con los 5 minutos públicos solo para entender la definición, no para ajustar nada.
-- Los 5 minutos públicos son el arranque del partido, con pocas paradas y el Barça con el balón:
-  no representan el partido entero. En el partido completo `D` es la etiqueta más común
-  (`starter/make_dummy_submission.py`), así que el 40–50% de `D` de IDSSE no es una anomalía.
-  Compara posesiones por minuto de balón vivo, no por minuto evaluado.
+- **Dónde se pierde el balón.** En IDSSE el balón existe siempre y la degradación lo esconde por
+  motivos físicos (gente cerca, aire, velocidad, fuera del campo), casi siempre con el balón en
+  juego. En Metrica el tracking corregido ya no tiene balón durante las paradas, así que allí
+  «no se ve el balón» casi equivale a «balón muerto». No sabemos cuál de los dos patrones sigue el
+  ATD del reto: medidlo en el partido real sin etiquetas (duración de los tramos sin balón) antes
+  de confiar en una señal basada en eso.
+- La degradación es un modelo nuestro, no el tracker de Metrica.
+- No hay fases tácticas en el Smart Tagging sintético, ni vídeo, ni homografía.
+- Las etiquetas de Metrica salen de eventos: hay que revisar unos minutos a ojo antes de fiarse.
 
-## Estadísticas
+## Estadísticas (etiquetas armonizadas)
 {stats_table}
 {verify_text}
 """
 
 
-def write_readme(out_dir, metas, rows, splits, seeds_per_split, verify_result):
+def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, groups):
     split_of = {m: s for s, items in splits.items() for m, _ in items}
     split_table = "| partición | partidos | semillas |\n|---|---|---|\n" + "\n".join(
-        "| %s | %s | %s |" % (s, ", ".join(sorted({m for m, _ in items})), seeds_per_split[s])
-        for s, items in splits.items())
-    stats = ["| partido | partición | división | min evaluados | % D | posesiones | por min vivo | < 1 s | duración media "
-             "| posesiones (control) | por min vivo (control) | duración media (control) | balón visible | objetos |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        "| %s | %s | %s |" % (s, ", ".join(sorted({m for m, _ in items})), seeds_per_split.get(s, 1))
+        for s, items in splits.items() if items)
+    head = ("| partido | fuente | partición | min evaluados | posesiones por min vivo | duración media (mediana) | "
+            "< 1 s | % D | balón visible (vivo / muerto) | objetos |")
+    stats = [head, "|---|---|---|---|---|---|---|---|---|---|"]
     for meta in metas:
-        gt, gc = meta["ground_truth"], meta["ground_truth_control"]
+        gt, raw = meta["ground_truth"], meta["ground_truth_raw"]
         r = [x for x in rows if x["match"] == meta["match"]]
-        stats.append("| %s (%s) | %s | %s | %.0f | %.1f%% | %d | %.2f | %d | %.1f s | %d | %.2f | %.1f s | %.1f%% | %.1f |" % (
-            meta["match"], meta["title"], split_of.get(meta["match"], "-"), meta["division"], gt["graded_minutes"],
-            100 * gt["share"]["D"], gt["possessions"], gt["possessions_per_live_min"], gt["short_possessions_under_1s"],
-            gt["mean_possession_s"], gc["possessions"], gc["possessions_per_live_min"], gc["mean_possession_s"],
-            100 * np.mean([x["ball_visible_graded"] for x in r]), np.mean([x["mean_tracked_objects_graded"] for x in r])))
-    stats.append("| *referencia: 5 min públicos del reto (arranque, no representativo)* | | | 5 | 19,6% | 17 | 4,2 | | 14,2 s "
-                 "| | | | 59,3%* | 20,5* |")
-    stats.append("\n\\* del partido completo, según DATA.md.")
+        stats.append("| %s | %s | %s | %.0f | %.2f (bruto %.2f) | %.1f s (%.1f) | %.1f%% | %.1f%% | %.1f%% (%.0f / %.0f) | %.1f |" % (
+            meta["match"], meta["source"], split_of.get(meta["match"], "-"), gt["graded_minutes"],
+            gt["possessions_per_alive_min"], raw["possessions_per_alive_min"], gt["mean_possession_s"],
+            gt["median_possession_s"], 100 * gt["share_under_1s"], 100 * gt["share"]["D"],
+            100 * np.mean([x["ball_visible_graded"] for x in r]), 100 * np.mean([x["ball_visible_live"] for x in r]),
+            100 * np.mean([x["ball_visible_dead"] for x in r]), np.mean([x["mean_tracked_objects_graded"] for x in r])))
+    stats.append("\nReferencia del reto (DATA.md, partido completo): balón visible 59,3% de los frames evaluados, "
+                 "20,5 objetos. Los 5 minutos públicos (17 posesiones, 4,2 por minuto vivo) son el arranque del "
+                 "partido y no representan el partido entero.")
     verify_text = ""
-    if verify_result:
-        verify_text = ("\n## Comprobación\nBaselines oficiales (más cercano + voto por mayoría) puntuados con el scorer "
-                       "oficial, media de todos los partidos. En el partido real el orden es "
-                       "smooth50 > smooth125 > smooth25 > raw.\n\n"
-                       "| etiquetas | raw | smooth25 | smooth50 | smooth125 | ¿mismo orden? |\n|---|---|---|---|---|---|\n")
-        for version, (_, mean, same) in verify_result.items():
-            verify_text += "| `%s.csv` | %.3f | %.3f | %.3f | %.3f | %s |\n" % (
-                version, mean[0], mean[25], mean[50], mean[125],
-                "**sí**" if same else "**no**: cautela con las conclusiones sacadas de estos datos")
+    if groups:
+        lines = ["\n## Comprobación",
+                 "Baselines oficiales (más cercano + voto por mayoría), scorer oficial, media por fuente, con las "
+                 "dos versiones de etiquetas. En el partido real el orden es smooth50 > smooth125 > smooth25 > raw."]
+        for version, by_source in groups.items():
+            for source, g in by_source.items():
+                m = g["mean"]
+                lines.append("- **%s**, etiquetas %s: raw %.3f · smooth25 %.3f · smooth50 %.3f · smooth125 %.3f → %s" % (
+                    source, "armonizadas" if version == "harmonized" else "originales", m[0], m[25], m[50], m[125],
+                    "mismo orden que el partido real" if g["same"] else
+                    "orden distinto (%s)" % " > ".join("smooth%d" % w if w else "raw" for w in g["order"])))
+        verify_text = "\n".join(lines) + "\n"
+    h = harmonization
+    if h.get("calibrated"):
+        table = "\n".join("| %.2f | %.2f | %.1f s | %.1f%% | %s |" % (
+            r["touch_s"], r["possessions_per_alive_min"], r["mean_possession_s"], 100 * r["share_under_1s"],
+            "**sí**" if r["touch_s"] == h["touch_s"] else "") for r in h["table"])
+        htext = ("Dos limpiezas fijas para todas las fuentes: una parada de menos de {d} s no es una parada, y un "
+                 "cambio de menos de {r} s justo después de una reanudación es un parpadeo de los datos.\n\n"
+                 "Y una regla calibrada solo para IDSSE: un tramo del rival de menos de **{t} s** que vuelve al mismo "
+                 "equipo sin parada es un toque, no un cambio de posesión (CHALLENGE.md). El umbral se elige para que "
+                 "los partidos de **train** de IDSSE tengan tantas posesiones por minuto de balón vivo como los de "
+                 "**val_metrica** ({target:.2f}); otros partidos, nunca el del reto.\n\n"
+                 "| umbral (s) | posesiones por min vivo (train IDSSE) | duración media | < 1 s | elegido |\n|---|---|---|---|---|\n"
+                 ).format(d=MIN_DEAD_S, r=MIN_RESTART_SPELL_S, t=h["touch_s"], target=h["target"]) + table
+        if h["touch_s"] == TOUCH_GRID[0]:
+            htext += ("\n\nCon umbral 0 la regla no se aplica: los partidos de train ya tienen %s posesiones por minuto "
+                      "vivo que la referencia." % ("menos" if h["table"][0]["possessions_per_alive_min"] <= h["target"] else "más"))
+        elif h["touch_s"] == TOUCH_GRID[-1]:
+            htext += ("\n\n**Atención:** ni con el umbral máximo se llega a la referencia. Revisad las etiquetas de IDSSE "
+                      "a ojo antes de seguir: puede que la diferencia no sea solo de toques.")
+    else:
+        htext = ("Limpiezas fijas (paradas < %.1f s y parpadeos < %.1f s tras una reanudación). Regla de toques: %s." % (
+            MIN_DEAD_S, MIN_RESTART_SPELL_S, "%.2f s (fijado a mano)" % h["touch_s"] if h.get("touch_s") else "no aplicada"))
     seeds = ", ".join("%s ×%d" % (k, v) for k, v in seeds_per_split.items())
-    text = README.format(date=time.strftime("%Y-%m-%d"), seeds=seeds, citation=CITATION,
-                         split_table=split_table, pad_before=PAD_BEFORE_S, halftime=HALFTIME_S, pad_after=PAD_AFTER_S,
-                         min_stop="%g" % MIN_STOP_S, min_control="%g" % MIN_CONTROL_S,
+    text = README.format(date=time.strftime("%Y-%m-%d"), seeds=seeds, cite_idsse=CITATION["idsse"],
+                         cite_metrica=CITATION["metrica"], split_table=split_table, harmonization_text=htext,
+                         pad_before=PAD_BEFORE_S, halftime=HALFTIME_S, pad_after=PAD_AFTER_S,
                          stats_table="\n".join(stats), verify_text=verify_text)
     with open(os.path.join(out_dir, "README.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -857,65 +1117,111 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--raw-dir", default=os.path.join(ROOT, "external", "idsse_raw"),
                         help="IDSSE XML files, downloaded if missing (default: external/idsse_raw)")
+    parser.add_argument("--metrica-dir", default=os.path.join(ROOT, "external", "metrica_raw"),
+                        help="Metrica sample files, downloaded if missing (default: external/metrica_raw)")
     parser.add_argument("--out", default=None, help="where to write the datasets (default: external/datasets)")
-    parser.add_argument("--matches", nargs="*", default=None, help="subset of match ids (default: all seven)")
+    parser.add_argument("--matches", nargs="*", default=None, help="subset of match ids (default: all ten)")
     parser.add_argument("--train-seeds", type=int, default=2, help="degradations per training match")
     parser.add_argument("--eval-seeds", type=int, default=1, help="degradations per val/test match")
+    parser.add_argument("--touch-s", type=float, default=None,
+                        help="fix the touch rule instead of calibrating it on Metrica (0 = off)")
     parser.add_argument("--verify", action="store_true", help="score the official baselines on every match")
-    parser.add_argument("--selftest", action="store_true", help="build from fake_data/seed0 instead (no download)")
+    parser.add_argument("--selftest", action="store_true", help="fake match as IDSSE + the Metrica games")
     args = parser.parse_args()
 
     prm = dict(DEGRADE)
     t0 = time.time()
+    split_of = {m: s for s, ms in DEFAULT_SPLITS.items() for m in ms}
+    cleans = {}
     if args.selftest:
         out_dir = os.path.abspath(args.out or os.path.join(ROOT, "fake_data", "selftest_datasets"))
-        print("self-test: fake_data/seed0 -> %s" % out_dir)
-        clean = clean_from_fake(os.path.join(ROOT, "fake_data", "seed0", "truth.npz"))
-        meta, rows = write_match(clean, out_dir, [0, 1], prm)
-        metas, all_rows = [meta], [dict(r, match="FAKE0") for r in rows]
-        splits = {"train": [["FAKE0", 0]], "val": [["FAKE0", 1]], "test": []}
-        seeds_per_split = {"train": 1, "val": 1, "test": 0}
+        print("self-test -> %s\nFAKE0  synthetic match, standing in for an IDSSE training match" % out_dir)
+        cleans["FAKE0"] = clean_from_fake(os.path.join(ROOT, "fake_data", "seed0", "truth.npz"))
+        split_of["FAKE0"] = "train"
+        wanted = ["FAKE0"] + list(METRICA)
     else:
         out_dir = os.path.abspath(args.out or os.path.join(ROOT, "external", "datasets"))
-        matches = args.matches or list(IDSSE)
-        splits, metas, all_rows = {"train": [], "val": [], "test": []}, [], []
-        seeds_per_split = {"train": args.train_seeds, "val": args.eval_seeds, "test": args.eval_seeds}
-        for match in matches:
-            split = next(s for s, ms in DEFAULT_SPLITS.items() if match in ms)
-            seeds = list(range(seeds_per_split[split]))
-            print("%s  %s  (%s)" % (match, IDSSE[match][0], split))
-            meta_path, pos_path = fetch_idsse(match, os.path.abspath(args.raw_dir))
-            t1 = time.time()
-            clean = parse_dfl(meta_path, pos_path, match)
-            gt = possession_stats(clean["labels"], clean["halves"])
-            print("    parsed in %.0f s: %.0f min, %d possessions (%.2f/min, mean %.1f s), D %.1f%%" % (
-                time.time() - t1, gt["graded_minutes"], gt["possessions"], gt["possessions_per_min"],
-                gt["mean_possession_s"], 100 * gt["share"]["D"]))
-            meta, rows = write_match(clean, out_dir, seeds, prm)
-            gc = meta["ground_truth_control"]
-            print("    control labels: %d possessions (mean %.1f s); %d touches merged, %d false stops removed" % (
-                gc["possessions"], gc["mean_possession_s"], gc["changes"]["touches"], gc["changes"]["false_stops"]))
-            metas.append(meta)
-            all_rows += [dict(r, match=match) for r in rows]
-            splits[split] += [[match, s] for s in seeds]
-            del clean
+        wanted = args.matches or (list(IDSSE) + list(METRICA))
+
+    for match in wanted:
+        if match in cleans:
+            continue
+        t1 = time.time()
+        if match in IDSSE:
+            print("%s  %s  (%s)" % (match, IDSSE[match][0], split_of[match]))
+            clean = parse_dfl(*fetch_idsse(match, os.path.abspath(args.raw_dir)), match)
+        elif match in METRICA:
+            print("%s  Metrica sample game %d  (%s)" % (match, METRICA[match], split_of[match]))
+            clean = parse_metrica(match, fetch_metrica(match, os.path.abspath(args.metrica_dir)))
+        else:
+            raise SystemExit("unknown match %s" % match)
+        gt = possession_stats(clean["labels"], clean["halves"])
+        print("    parsed in %.0f s: %.0f min, %d possessions (%.2f per live min, mean %.1f s), D %.1f%%" % (
+            time.time() - t1, gt["graded_minutes"], gt["possessions"], gt["possessions_per_alive_min"],
+            gt["mean_possession_s"], 100 * gt["share"]["D"]))
+        cleans[match] = clean
+
+    # Labels: fixed clean-ups everywhere, then the touch rule for DFL-labelled matches.
+    for c in cleans.values():
+        c["labels"] = clean_artefacts(c["labels"], c["halves"])
+    dfl = [m for m, c in cleans.items() if c["source"] in ("idsse", "fake")]
+    harmonization = {"min_dead_s": MIN_DEAD_S, "min_restart_spell_s": MIN_RESTART_SPELL_S, "touch_s": 0.0,
+                     "touch_applies_to": "idsse", "calibrated": False}
+    if args.touch_s is not None:
+        harmonization["touch_s"] = args.touch_s
+    else:
+        train = [cleans[m] for m in dfl if split_of[m] == "train"]
+        reference = [c for m, c in cleans.items() if split_of.get(m) == "val_metrica"]
+        if train and reference:
+            touch, target, table = calibrate_touch(train, reference)
+            harmonization.update(touch_s=touch, target=target, table=table, calibrated=True,
+                                 rule="possessions per live minute of IDSSE train = mean of val_metrica")
+            print("\ntouch rule calibrated on IDSSE train vs val_metrica (%.2f possessions per live min):" % target)
+            for r in table:
+                print("    touch %.2f s -> %.2f per live min, mean %.1f s, %4.1f%% under 1 s%s" % (
+                    r["touch_s"], r["possessions_per_alive_min"], r["mean_possession_s"], 100 * r["share_under_1s"],
+                    "   <- chosen" if r["touch_s"] == touch else ""))
+        elif dfl:
+            print("\n(no val_metrica games or no IDSSE train games: touch rule not calibrated, not applied)")
+    for m in dfl:
+        cleans[m]["labels"] = merge_touches(cleans[m]["labels"], cleans[m]["halves"], harmonization["touch_s"])
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "label_harmonization.json"), "w") as handle:
+        json.dump(harmonization, handle, indent=2)
+
+    seeds_per_split = {"train": args.train_seeds, "val": args.eval_seeds, "test": args.eval_seeds,
+                       "val_metrica": args.eval_seeds, "test_metrica": args.eval_seeds}
+    splits = {s: [] for s in seeds_per_split}
+    metas, all_rows = [], []
+    print()
+    for match, clean in cleans.items():
+        split = split_of[match]
+        seeds = list(range(seeds_per_split[split]))
+        print("%s  writing (%s)" % (match, split))
+        meta, rows = write_match(clean, out_dir, seeds, prm,
+                                 harmonization if clean["source"] != "metrica" else
+                                 dict(harmonization, touch_s=0.0, note="reference labels: touch rule not applied"))
+        metas.append(meta)
+        all_rows += [dict(r, match=match) for r in rows]
+        splits[split] += [[match, s] for s in seeds]
+    cleans.clear()
+
     with open(os.path.join(out_dir, "splits.json"), "w") as handle:
-        json.dump(splits, handle, indent=2)
+        json.dump({k: v for k, v in splits.items() if v}, handle, indent=2)
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["match", "seed", "possessions", "possessions_per_min", "possessions_per_live_min",
-                         "mean_possession_s", "dead_share", "possessions_control", "possessions_per_live_min_control",
-                         "mean_possession_s_control", "ball_visible_graded", "mean_tracked_objects_graded",
-                         "smart_tagging_instances"])
+        writer.writerow(["match", "source", "seed", "possessions", "possessions_per_alive_min", "possessions_per_alive_min_raw",
+                         "mean_possession_s", "share_under_1s", "dead_share", "ball_visible_graded", "ball_visible_live",
+                         "ball_visible_dead", "mean_tracked_objects_graded", "smart_tagging_instances"])
         for r in all_rows:
             meta = next(m for m in metas if m["match"] == r["match"])
-            gt, gc = meta["ground_truth"], meta["ground_truth_control"]
-            writer.writerow([r["match"], r["seed"], gt["possessions"], gt["possessions_per_min"],
-                             gt["possessions_per_live_min"], gt["mean_possession_s"], gt["share"]["D"],
-                             gc["possessions"], gc["possessions_per_live_min"], gc["mean_possession_s"],
-                             r["ball_visible_graded"], r["mean_tracked_objects_graded"], r["smart_tagging_instances"]])
-    result = verify(out_dir, {s: v for s, v in splits.items() if v}) if args.verify else None
-    write_readme(out_dir, metas, all_rows, splits, seeds_per_split, result)
+            gt = meta["ground_truth"]
+            writer.writerow([r["match"], meta["source"], r["seed"], gt["possessions"], gt["possessions_per_alive_min"],
+                             meta["ground_truth_raw"]["possessions_per_alive_min"], gt["mean_possession_s"],
+                             gt["share_under_1s"], gt["share"]["D"], r["ball_visible_graded"], r["ball_visible_live"],
+                             r["ball_visible_dead"], r["mean_tracked_objects_graded"], r["smart_tagging_instances"]])
+    groups = verify(out_dir, {s: v for s, v in splits.items() if v}) if args.verify else None
+    write_readme(out_dir, metas, all_rows, splits, seeds_per_split, harmonization, groups)
     print("\ndatasets in %s  (%.0f s)" % (out_dir, time.time() - t0))
 
 
