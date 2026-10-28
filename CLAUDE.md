@@ -82,9 +82,11 @@ tools/build_datasets.py           datasets train/val/test a partir de IDSSE (DFL
 external/                         IDSSE en bruto y datasets generados (en .gitignore, se puede leer)
 src/mtah/                         nuestro código
   features.py                     evidencia por frame (jugador más cercano, toques, velocidades)
+  train_classifier.py             clasificador por frame; validación cruzada dejando un partido fuera
   dead_ball.py                    detección de D
   gaps.py                         huecos sin balón
-  decoder.py                      decodificador temporal (HMM/Viterbi)
+  decoder.py                      decodificador temporal (HMM/Viterbi); parámetros provisionales
+                                  hasta el diagnóstico del balón (tools/ball_gap_diagnostic.py)
   pipeline.py                     une los módulos y escribe el CSV
 scripts/make_submission.py        el único comando que regenera la entrega
 validation/                       banco de validación con otros partidos
@@ -161,9 +163,11 @@ python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metr
 - **Etiquetas armonizadas** (`labels.csv`, por defecto) y **originales** (`labels_raw.csv`). La DFL
   cuenta los toques del rival como cambios de posesión; en IDSSE, un tramo del rival que vuelve al
   mismo equipo sin parada se trata como toque si ningún rival tuvo el balón a ≤ 1,5 m durante
-  ≥ 0,5 s en el tracking limpio (regla de control). `label_harmonization.json` guarda la rejilla
+  ≥ 0,4 s en el tracking limpio (regla de control). `label_harmonization.json` guarda la rejilla
   calibrada contra la distribución de duraciones de val_metrica y la validación cruzada entre sus
-  dos partidos. Una conclusión vale si se sostiene con las dos versiones.
+  dos partidos: los ajustes de la diagonal son equivalentes dentro del ruido entre partidos, y
+  1,5 m / 0,4 s se elige por interpretación física (alcance + error del tracking; tiempo de
+  controlar y jugar). Una conclusión vale si se sostiene con las dos versiones.
 - En Metrica, `labels_from_events` trata como parada un CHALLENGE con FAULT (sin ADVANTAGE), y con
   el balón muerto solo un SET PIECE o un saque de puerta reanudan; si no hay reanudación propia (en
   60 s o antes de la siguiente parada), el primer evento de posesión reanuda.
@@ -197,7 +201,8 @@ python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metr
 
 - Cada cambio se prueba primero sobre datos falsos, y cada CSV pasa por `validate_submission.py`.
 - Cada experimento se anota en `experiments/log.csv`: fecha, autor, commit, qué cambia, banco
-  usado, spellF1, macroF1 y número de posesiones.
+  usado, spellF1, macroF1 y número de posesiones, más smooth50 en los mismos partidos y etiquetas
+  como referencia de dificultad.
 - Ve anotando en `docs/technical_document.md` lo que pide `SUBMISSION.md`: el enfoque y por qué,
   qué datos se usan y cuáles se descartan, los datos de entrenamiento (nunca de este partido), las
   reglas de posesión implementadas (balones sueltos, duelos, reanudaciones), las limitaciones y

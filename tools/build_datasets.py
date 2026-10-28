@@ -23,10 +23,12 @@ Label harmonisation. DFL's BallPossession changes hands far more often than Metr
 one CONTROL rule to IDSSE: an opponent spell that returns to the same team without a stoppage is
 a touch, not a change of possession, if no opponent kept the ball within CONTROL_M metres for
 CONTROL_S seconds in the clean tracking (CHALLENGE.md: "a simple touch without control", "a
-deflection", "an aerial duel won without subsequent control"). The two values come from a grid
-scored against the duration distribution of the Metrica VAL games (label_harmonization.json keeps
-the grid, the loss and a cross-check between the two games) -- other games only, never the
-challenge match. The raw labels are kept beside the harmonised ones (labels_raw.csv), so every
+deflection", "an aerial duel won without subsequent control"). A grid scored against the duration
+distribution of the Metrica VAL games (label_harmonization.json keeps the grid, the loss and a
+cross-check between the two games) leaves a diagonal of equivalent settings -- a shorter reach
+with a shorter time or a longer reach with a longer time -- whose differences are below the noise
+between the two games; within it the team picks the values on physical grounds (CONTROL_CHOICE).
+Other games only, never the challenge match. The raw labels are kept beside the harmonised ones (labels_raw.csv), so every
 conclusion can be checked on both.
 
 Neither source is the challenge data: both are clean tracking with player identities. Every match
@@ -152,7 +154,12 @@ TAG_FALSE = 0.03
 # Label harmonisation: fixed artefact clean-ups for every source, plus the control rule for IDSSE.
 MIN_DEAD_S = 1.0                       # a real stoppage lasts seconds
 MIN_RESTART_SPELL_S = 0.2              # a flicker right after a restart is an artefact
-CONTROL_M, CONTROL_S = 1.5, 0.5        # team choice; the grid and cross-check are in label_harmonization.json
+CONTROL_M, CONTROL_S = 1.5, 0.4        # team choice; the grid and cross-check are in label_harmonization.json
+CONTROL_CHOICE = (
+    "The grid settings along the diagonal (1.0 m / 0.2 s, 1.5 m / 0.4 s, 2.0 m / 0.5-0.6 s) are equivalent: their "
+    "losses differ by less than the loss between the two reference games themselves. 1.5 m / 0.4 s is chosen on "
+    "physical grounds: 1.5 m is a player's reach plus the tracking error of player and ball positions, and 0.4 s is "
+    "about the time needed to control the ball and play it.")
 CONTROL_GAP = 3                        # frames: a ball-tracking blip does not break a control spell
 CONTROL_MARGIN = 5                     # frames either side of a spell also searched for control
 CONTROL_GRID_M = (0.75, 1.0, 1.5, 2.0)
@@ -985,6 +992,22 @@ def load_match(dataset_dir, match, seed=0, labels="harmonized"):
 # Verification: the official baselines on every match, scored with the official scorer
 # ==================================================================================================
 
+def nearest_player_codes(m):
+    """The official baseline's raw signal on a loaded match: per frame, the team of the player nearest
+    the ball (0 home, 1 away), -1 where the ball is missing. starter/baseline.smooth turns it into labels."""
+    players, ball, team = m["players"], m["ball"], m["slot_team"]
+    codes = np.full(len(ball), -1, dtype=np.int8)
+    seen = np.flatnonzero(~np.isnan(ball[:, 0]))
+    for s in range(0, len(seen), 20000):
+        idx = seen[s:s + 20000]
+        d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
+        d = np.where(np.isnan(d), np.inf, d)
+        k = np.argmin(d, axis=1)
+        ok = np.isfinite(d[np.arange(len(idx)), k])
+        codes[idx[ok]] = team[k[ok]]
+    return codes
+
+
 def verify(out_dir, splits):
     import possession_metrics as pm
     from baseline import smooth
@@ -997,16 +1020,7 @@ def verify(out_dir, splits):
             m = load_match(out_dir, match, seed)
             raw = np.loadtxt(os.path.join(out_dir, "matches", match, "labels_raw.csv"), delimiter=",",
                              skiprows=1, dtype=str)[:, 1]
-            players, ball, team = m["players"], m["ball"], m["slot_team"]
-            codes = np.full(len(ball), -1, dtype=np.int8)
-            seen = np.flatnonzero(~np.isnan(ball[:, 0]))
-            for s in range(0, len(seen), 20000):
-                idx = seen[s:s + 20000]
-                d = np.linalg.norm(players[idx] - ball[idx, None, :], axis=2)
-                d = np.where(np.isnan(d), np.inf, d)
-                k = np.argmin(d, axis=1)
-                ok = np.isfinite(d[np.arange(len(idx)), k])
-                codes[idx[ok]] = team[k[ok]]
+            codes = nearest_player_codes(m)
             gts = {"harmonized": pm.label_codes(m["labels"]), "raw": pm.label_codes(raw)}
             row = {"split": split, "match": match, "seed": seed, "source": m["meta"]["source"]}
             for w in windows:
@@ -1169,8 +1183,13 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, g
         htext += ("Y una regla solo para IDSSE: un tramo del rival que vuelve al mismo equipo sin parada es un toque, no "
                   "un cambio de posesión, si ningún jugador rival tuvo el balón a ≤ **%g m** durante ≥ **%g s** según el "
                   "tracking limpio (CHALLENGE.md: «un toque sin control», «un desvío», «un duelo aéreo sin control "
-                  "posterior»). Los dos valores los fija el equipo; la calibración de abajo muestra cómo quedan frente "
-                  "al resto de la rejilla." % (h["control_m"], h["control_s"]))
+                  "posterior»)." % (h["control_m"], h["control_s"]))
+        if "choice" in h:
+            htext += (" En la rejilla de abajo, los ajustes de la diagonal (1 m / 0,2 s, 1,5 m / 0,4 s, 2 m / 0,5–0,6 s) "
+                      "son equivalentes: sus pérdidas se diferencian menos que los dos partidos de referencia entre sí. "
+                      "Dentro de ella se elige 1,5 m / 0,4 s por interpretación física: 1,5 m es el alcance de un "
+                      "jugador más el error del tracking en la posición del jugador y del balón, y 0,4 s es el tiempo "
+                      "aproximado de controlar el balón y jugarlo.")
     else:
         htext += "Regla de control: no aplicada."
     cal = h.get("calibration")
@@ -1263,6 +1282,8 @@ def main():
             "control_m": args.control_m, "control_s": args.control_s, "applies_to": "idsse",
             "control_gap_frames": CONTROL_GAP, "control_margin_frames": CONTROL_MARGIN}
     harmonization = dict(rule)
+    if (args.control_m, args.control_s) == (CONTROL_M, CONTROL_S):
+        harmonization["choice"] = CONTROL_CHOICE
     train = [cleans[m] for m in dfl if split_of[m] == "train"]
     refs = {m: c for m, c in cleans.items() if split_of.get(m) == "val_metrica"}
     if train and refs and args.control_m > 0:
