@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Temporal decoder: per-frame probabilities -> one H / A / D label per frame (HMM + Viterbi).
+
+    python src/mtah/decoder.py --pred external/predictions/cv_gbm_harmonized_ball-near-context-players-gap-tags --log
+
+Three states, H, A and D. The emission of each frame is the classifier's log-probability; a path
+pays a cost (in the same log units) every time it changes state:
+
+    switch          H <-> A, a change of possession without a stoppage
+    to_dead         H / A -> D, the ball goes dead
+    from_dead       D -> H / A, play restarts
+    from_dead_tag   D -> H / A inside a Smart Tagging SET PIECES window widened by tag_margin_s:
+                    restarts are cheaper where the tagging says there is one
+
+Viterbi finds the cheapest path over each half. The costs are fitted by coordinate descent on the
+official spellF1 (macroF1 breaks ties), averaging two benches that weigh the same: the IDSSE
+predictions made with each match left out (train_classifier.py, oof/) and val_metrica (the mean of
+the six rounds). --fit-on idsse / val_metrica fits on one bench only, so the other one scores the
+decoder out of sample. test and test_metrica are never read.
+
+PROVISIONAL: where the tracker loses the ball in the challenge match is not known yet
+(tools/ball_gap_diagnostic.py), and the synthetic SET PIECES windows sit +/-2-3 s around the
+restart by construction -- the real tagging's timing is unknown. Refit once the diagnostic is in.
+
+Decoding runs on blocks of --block frames (log-probabilities summed, so the costs mean the same
+at any block size); the result is expanded back to frames.
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+for sub in ("src", "tools", "evaluation", "starter"):
+    sys.path.insert(0, os.path.join(ROOT, sub))
+
+from mtah.train_classifier import FPS, append_log, by_match, mean_of, score, set_pieces, smooth50  # noqa: E402
+
+STATES = np.array(["H", "A", "D"])
+COSTS = ("switch", "to_dead", "from_dead", "from_dead_tag")
+GRID = {"switch": (4, 8, 16, 32, 64, 128, 256), "to_dead": (2, 4, 8, 16, 32, 64, 128, 256, 512),
+        "from_dead": (4, 8, 16, 32, 64, 128, 256), "from_dead_tag": (0, 1, 2, 4, 8, 16, 32),
+        "tag_margin_s": (0, 1, 2, 4, 8)}
+START = {"switch": 32, "to_dead": 16, "from_dead": 32, "from_dead_tag": 4, "tag_margin_s": 1}
+MIN_P = 1e-4
+
+
+def transitions(costs):
+    """Log transition matrices (K, from, to) outside and inside a tag zone. costs: (K, 4)."""
+    sw, td, fd, ft = (costs[:, i, None, None] for i in range(4))
+    out = np.zeros((len(costs), 3, 3))
+    out = out - sw * np.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]]) - td * np.array([[0, 0, 1], [0, 0, 1], [0, 0, 0]])
+    live = np.array([[0, 0, 0], [0, 0, 0], [1, 1, 0]])
+    return out - fd * live, out - ft * live
+
+
+def viterbi(logp, zone, costs):
+    """Best state path for each of K cost settings at once. logp (n, 3), zone (n,) bool, costs
+    (K, 4). Returns (K, n) state indices."""
+    n, k = len(logp), len(costs)
+    plain, tagged = transitions(np.asarray(costs, dtype=np.float64))
+    back = np.empty((n, k, 3), dtype=np.int8)
+    delta = np.repeat(logp[None, 0], k, axis=0)
+    for t in range(1, n):
+        cand = delta[:, :, None] + (tagged if zone[t] else plain)
+        back[t] = cand.argmax(axis=1)
+        delta = np.take_along_axis(cand, back[t][:, None, :].astype(np.intp), axis=1)[:, 0, :] + logp[t]
+    path = np.empty((k, n), dtype=np.int8)
+    path[:, -1] = delta.argmax(axis=1)
+    rows = np.arange(k)
+    for t in range(n - 1, 0, -1):
+        path[:, t - 1] = back[t][rows, path[:, t]]
+    return path
+
+
+def tag_zone(tags, n, margin_s):
+    zone = np.zeros(n, dtype=bool)
+    m = int(round(margin_s * FPS))
+    for lo, hi, _ in tags:
+        zone[max(lo - m, 0):max(min(hi + m, n), 0)] = True
+    return zone
+
+
+def decode(proba, halves, tags, costs, margin_s, block=5):
+    """Labels (K, n) for K cost settings; 'X' outside the halves."""
+    costs = np.atleast_2d(costs)
+    n = len(proba)
+    out = np.full((len(costs), n), "X", dtype="<U1")
+    zone = tag_zone(tags, n, margin_s)
+    logp = np.log(np.clip(proba, MIN_P, 1.0))
+    for a, b in halves:
+        m = b + 1 - a
+        nb = -(-m // block)
+        pad = nb * block - m
+        lp = np.concatenate([logp[a:b + 1], np.zeros((pad, 3))]).reshape(nb, block, 3).sum(axis=1)
+        zb = np.concatenate([zone[a:b + 1], np.zeros(pad, dtype=bool)]).reshape(nb, block).any(axis=1)
+        path = viterbi(lp, zb, costs)
+        out[:, a:b + 1] = STATES[np.repeat(path, block, axis=1)[:, :m]]
+    return out
+
+
+def load_bench(pred_dir, datasets, labels):
+    """{(bench, match, seed): proba, gt labels, graded mask, halves, tags} for oof/ and val_metrica/."""
+    import build_datasets as bd
+    items = {}
+    for bench, pattern in (("idsse", "oof/*_s*.npz"), ("val_metrica", "val_metrica/*_s?.npz")):
+        for path in sorted(glob.glob(os.path.join(pred_dir, pattern))):
+            match, seed = os.path.basename(path)[:-4].rsplit("_s", 1)
+            seed = int(seed)
+            m = bd.load_match(datasets, match, seed, labels=labels)
+            halves = [(a, b) for _, a, b in m["meta"]["halves"]]
+            graded = np.zeros(len(m["labels"]), dtype=bool)
+            for a, b in halves:
+                graded[a:b + 1] = True
+            items[bench, match, seed] = {"p": np.load(path)["p"], "gt": m["labels"], "graded": graded, "halves": halves,
+                                         "tags": set_pieces(m["smart_tagging"], m["meta"]["home"], m["meta"]["away"])}
+    return items
+
+
+def evaluate(items, settings, block, fit_on=("idsse", "val_metrica")):
+    """Scores for each setting (dicts with the four costs and tag_margin_s), per bench."""
+    results = [{"idsse": [], "val_metrica": []} for _ in settings]
+    margins = sorted({s["tag_margin_s"] for s in settings})
+    for (bench, match, seed), it in items.items():
+        for margin in margins:
+            idx = [i for i, s in enumerate(settings) if s["tag_margin_s"] == margin]
+            costs = [[settings[i][c] for c in COSTS] for i in idx]
+            for i, pred in zip(idx, decode(it["p"], it["halves"], it["tags"], costs, margin, block)):
+                results[i][bench].append(dict(score(it["gt"], pred, it["graded"]), match=match, seed=seed))
+    out = []
+    for rows in results:
+        r = {"idsse": by_match(rows["idsse"], ("spell_f1", "macro_f1", "possessions")),
+             "val_metrica": mean_of(rows["val_metrica"], ("spell_f1", "macro_f1", "possessions")),
+             "rows": rows}
+        r["objective"] = float(np.mean([r[b]["spell_f1"] for b in fit_on]))
+        r["tie_break"] = float(np.mean([r[b]["macro_f1"] for b in fit_on]))
+        out.append(r)
+    return out
+
+
+def fit(items, block, fit_on, passes=3):
+    """Coordinate descent over GRID from START; returns the best setting and the search trace."""
+    best = dict(START)
+    best_score = evaluate(items, [best], block, fit_on)[0]
+    trace = []
+    for p in range(passes):
+        changed = False
+        for name, values in GRID.items():
+            settings = [dict(best, **{name: v}) for v in values]
+            scores = evaluate(items, settings, block, fit_on)
+            for s, r in zip(settings, scores):
+                trace.append({"pass": p + 1, "param": name, "value": s[name], "objective": r["objective"],
+                              "idsse": r["idsse"]["spell_f1"], "val_metrica": r["val_metrica"]["spell_f1"]})
+            i = max(range(len(values)), key=lambda j: (scores[j]["objective"], scores[j]["tie_break"]))
+            print("  pass %d  %-14s %s -> %g   objective %.4f   (idsse %.4f   val_metrica %.4f)" % (
+                p + 1, name, " ".join("%g:%.3f" % (v, r["objective"]) for v, r in zip(values, scores)), values[i],
+                scores[i]["objective"], scores[i]["idsse"]["spell_f1"], scores[i]["val_metrica"]["spell_f1"]))
+            if (scores[i]["objective"], scores[i]["tie_break"]) > (best_score["objective"], best_score["tie_break"]):
+                best, best_score, changed = settings[i], scores[i], True
+        if not changed:
+            break
+    return best, best_score, trace
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--pred", required=True, help="a train_classifier.py output folder (oof/ and val_metrica/)")
+    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets"))
+    parser.add_argument("--block", type=int, default=5, help="frames per decoding step")
+    parser.add_argument("--fit-on", choices=("both", "idsse", "val_metrica"), default="both",
+                        help="the bench(es) the costs are fitted on")
+    parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
+    args = parser.parse_args()
+    fit_on = ("idsse", "val_metrica") if args.fit_on == "both" else (args.fit_on,)
+
+    with open(os.path.join(args.pred, "summary.json")) as handle:
+        labels = json.load(handle)["labels"]
+    name = os.path.basename(os.path.normpath(args.pred))
+    t0 = time.time()
+    items = load_bench(args.pred, args.datasets, labels)
+    print("%s: %d sequences, %s labels, block %d frames, fitted on %s" % (name, len(items), labels, args.block,
+                                                                        " + ".join(fit_on)))
+    best, scores, trace = fit(items, args.block, fit_on)
+    base = {b: [dict(smooth50(args.datasets, m, s, os.path.dirname(os.path.normpath(args.pred)))[labels], match=m)
+                for (bb, m, s) in items if bb == b] for b in ("idsse", "val_metrica")}
+    base = {"idsse": by_match(base["idsse"], ("spell_f1", "macro_f1", "possessions")),
+            "val_metrica": mean_of(base["val_metrica"], ("spell_f1", "macro_f1", "possessions"))}
+    truth = {b: by_match([dict(possessions=int(np.sum((it["gt"][1:] != it["gt"][:-1]) & np.isin(it["gt"][1:], ("H", "A")))),
+                                match=m) for (bb, m, s), it in items.items() if bb == b], ("possessions",))
+             for b in ("idsse", "val_metrica")}
+    print("best: %s" % ", ".join("%s %g" % kv for kv in best.items()))
+    for b in ("idsse", "val_metrica"):
+        print("  %-12s spellF1 %.3f   macroF1 %.3f   possessions %4.0f (truth %4.0f)   | smooth50 spellF1 %.3f   "
+              "macroF1 %.3f   possessions %4.0f" % (b, scores[b]["spell_f1"], scores[b]["macro_f1"], scores[b]["possessions"],
+                                                    truth[b]["possessions"], base[b]["spell_f1"], base[b]["macro_f1"],
+                                                    base[b]["possessions"]))
+    out = os.path.join(args.pred, "decoder.json" if args.fit_on == "both" else "decoder_fit-%s.json" % args.fit_on)
+    with open(out, "w") as handle:
+        json.dump({"provisional": True, "block": args.block, "labels": labels, "fit_on": fit_on, "params": best,
+                   "scores": {b: scores[b] for b in ("idsse", "val_metrica")}, "rows": scores["rows"],
+                   "smooth50": base, "truth_possessions": truth, "trace": trace}, handle, indent=2)
+    print("saved %s  (%.0f s)" % (out, time.time() - t0))
+    if args.log:
+        change = "%s + HMM decoder fitted on %s (provisional: %s)" % (name, " + ".join(fit_on),
+                                                                      ", ".join("%s %g" % kv for kv in best.items()))
+        append_log([(change, "cv_idsse oof/%s labels" % labels, scores["idsse"], base["idsse"]),
+                    (change, "val_metrica ensemble of rounds/%s labels" % labels, scores["val_metrica"],
+                     base["val_metrica"])])
+
+
+if __name__ == "__main__":
+    main()
