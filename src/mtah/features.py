@@ -12,9 +12,10 @@ Feature groups, any of which can be left out:
     near     who is near the ball right now
     context  who has been near the ball over the last / next seconds (centred windows)
     players  how fast the players move, where each team is and whether it is advancing
-    gap      how long the ball has been / will be missing -- DEPENDS ON WHERE THE TRACKER LOSES
-             THE BALL, which differs between IDSSE and Metrica and is not known yet for the real
-             match (tools/ball_gap_diagnostic.py). Keep a model without it until that is settled.
+    gap      whether the ball is seen, how long it has been / will be missing and the share of
+             it seen in centred windows -- DEPENDS ON WHERE THE TRACKER LOSES THE BALL. The
+             datasets now copy the real ATD's pattern (tools/ball_gap_diagnostic.py), but only its
+             aggregates; keep comparing against a model without this group.
     tags     Smart Tagging SET PIECES windows
 """
 
@@ -33,10 +34,10 @@ COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
     "near": ["d_home", "d_away", "d_diff", "n_home_near", "n_away_near", "nearest_home"],
-    "context": [c % s for s in CONTEXT_S for c in ("nearest_home_%gs", "ball_seen_%gs", "d_diff_%gs")],
+    "context": [c % s for s in CONTEXT_S for c in ("nearest_home_%gs", "d_diff_%gs")],
     "players": ["speed_all", "speed_home", "speed_away", "still_share", "n_objects", "territory_home",
                 "territory_away", "advance_home", "advance_away", "speed_all_2s"],
-    "gap": ["ball_seen", "gap_since_s", "gap_until_s", "gap_length_s"],
+    "gap": ["ball_seen", "gap_since_s", "gap_until_s", "gap_length_s"] + ["ball_seen_%gs" % s for s in CONTEXT_S],
     "tags": ["in_set_piece", "set_piece_team", "to_set_piece_s"],
 }
 
@@ -129,8 +130,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols["nearest_home"] = nearest_home
     if "context" in groups:
         for s in CONTEXT_S:
-            mean, cover = _window_mean(nearest_home, int(s * FPS))
-            cols["nearest_home_%gs" % s], cols["ball_seen_%gs" % s] = mean, cover
+            cols["nearest_home_%gs" % s], _ = _window_mean(nearest_home, int(s * FPS))
             cols["d_diff_%gs" % s], _ = _window_mean(d_home - d_away, int(s * FPS))
 
     if "players" in groups:
@@ -157,6 +157,8 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         since, until, length = _gap_lengths(~seen)
         cols["ball_seen"] = seen.astype(np.float32)
         cols["gap_since_s"], cols["gap_until_s"], cols["gap_length_s"] = since, until, length
+        for s in CONTEXT_S:
+            _, cols["ball_seen_%gs" % s] = _window_mean(np.where(seen, 1.0, np.nan).astype(np.float32), int(s * FPS))
 
     if "tags" in groups:
         inside = np.zeros(n, dtype=np.float32)

@@ -171,17 +171,23 @@ python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metr
 - En Metrica, `labels_from_events` trata como parada un CHALLENGE con FAULT (sin ADVANTAGE), y con
   el balón muerto solo un SET PIECE o un saque de puerta reanudan; si no hay reanudación propia (en
   60 s o antes de la siguiente parada), el primer evento de posesión reanuda.
-- El tracking está **degradado** para parecerse al ATD (46 slots, balón ausente en ~41% de los
-  frames, cambios de identidad) y el Smart Tagging es **sintético** (solo SET PIECES).
-  **Ojo con el balón:** en Metrica falta durante las paradas; en IDSSE la degradación lo quita
-  sobre todo con el balón en juego. No sabemos aún qué patrón sigue el ATD real: no construyas
-  señales que dependan de eso sin el diagnóstico del partido real
-  (`tools/ball_gap_diagnostic.py --data-dir ... --datasets external/datasets`, lo ejecuta una
-  persona; solo imprime agregados).
+- El tracking está **degradado** para parecerse al ATD (46 slots, cambios de identidad) y el
+  Smart Tagging es **sintético** (solo SET PIECES, ventanas de ~5 s alrededor de la reanudación).
+- **El balón** copia el patrón del ATD real, medido con `tools/ball_gap_diagnostic.py` (lo ejecuta
+  una persona; solo agregados, sin etiquetas): ningún tramo sin balón de menos de 2 s y casi todo
+  en tramos de más de 10 s. La degradación interpola las pérdidas de menos de 5 s y esconde el
+  balón fuera del campo, en las paradas (p_dead) y en tramos largos en juego (r_live). Esos
+  valores se calibran con esos agregados sobre train de IDSSE (`ball_degradation.json`): es el
+  único uso del partido del reto en los datasets, y solo de la forma de sus huecos. En train cada
+  semilla varía un poco alrededor de lo calibrado. Si el diagnóstico se vuelve a ejecutar, copia
+  sus números en `REAL_BALL_GAPS` y reconstruye.
 - Es un dataset público, no del reto: **sí puedes leer `external/`**. Carga los partidos con
   `load_match()` de `tools/build_datasets.py` (`labels="raw"` para las originales).
 - Con `--verify`, comprueba por fuente y con las dos versiones de etiquetas si los baselines
   oficiales se ordenan como en el partido real (smooth50 > smooth125 > smooth25 > raw).
+- **Comparaciones**: cada experimento se corre con las dos versiones de etiquetas y se compara
+  partido a partido con bootstrap pareado (`src/mtah/compare.py`). Diferencias de spellF1 por debajo
+  de ~0,04 con dos partidos son ruido.
 
 ## Cómo elegimos entre métodos
 

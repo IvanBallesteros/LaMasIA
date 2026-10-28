@@ -16,7 +16,8 @@ Viterbi finds the cheapest path over each half. The costs are fitted by coordina
 official spellF1 (macroF1 breaks ties), averaging two benches that weigh the same: the IDSSE
 predictions made with each match left out (train_classifier.py, oof/) and val_metrica (the mean of
 the six rounds). --fit-on idsse / val_metrica fits on one bench only, so the other one scores the
-decoder out of sample. test and test_metrica are never read.
+decoder out of sample; --target picks the IDSSE labels it is fitted against. The result is always
+scored on both label versions. test and test_metrica are never read.
 
 PROVISIONAL: where the tracker loses the ball in the challenge match is not known yet
 (tools/ball_gap_diagnostic.py), and the synthetic SET PIECES windows sit +/-2-3 s around the
@@ -105,34 +106,49 @@ def decode(proba, halves, tags, costs, margin_s, block=5):
     return out
 
 
-def load_bench(pred_dir, datasets, labels):
-    """{(bench, match, seed): proba, gt labels, graded mask, halves, tags} for oof/ and val_metrica/."""
+VERSIONS = ("harmonized", "raw")
+BENCHES = ("idsse", "val_metrica")
+
+
+def load_bench(pred_dir, datasets):
+    """{(bench, match, seed): proba, gt labels (both versions), graded mask, halves, tags} for oof/
+    and val_metrica/."""
     import build_datasets as bd
     items = {}
     for bench, pattern in (("idsse", "oof/*_s*.npz"), ("val_metrica", "val_metrica/*_s?.npz")):
         for path in sorted(glob.glob(os.path.join(pred_dir, pattern))):
             match, seed = os.path.basename(path)[:-4].rsplit("_s", 1)
             seed = int(seed)
-            m = bd.load_match(datasets, match, seed, labels=labels)
+            m = bd.load_match(datasets, match, seed)
             halves = [(a, b) for _, a, b in m["meta"]["halves"]]
             graded = np.zeros(len(m["labels"]), dtype=bool)
             for a, b in halves:
                 graded[a:b + 1] = True
-            items[bench, match, seed] = {"p": np.load(path)["p"], "gt": m["labels"], "graded": graded, "halves": halves,
+            gt = {"harmonized": m["labels"], "raw": bd.load_match(datasets, match, seed, labels="raw")["labels"]}
+            items[bench, match, seed] = {"p": np.load(path)["p"], "gt": gt, "graded": graded, "halves": halves,
                                          "tags": set_pieces(m["smart_tagging"], m["meta"]["home"], m["meta"]["away"])}
     return items
 
 
-def evaluate(items, settings, block, fit_on=("idsse", "val_metrica")):
-    """Scores for each setting (dicts with the four costs and tag_margin_s), per bench."""
-    results = [{"idsse": [], "val_metrica": []} for _ in settings]
+def decode_items(items, setting, block):
+    """{key: labels} for one setting."""
+    costs = [[setting[c] for c in COSTS]]
+    return {key: decode(it["p"], it["halves"], it["tags"], costs, setting["tag_margin_s"], block)[0]
+            for key, it in items.items()}
+
+
+def evaluate(items, settings, block, fit_on=BENCHES, target="harmonized"):
+    """Scores for each setting (dicts with the four costs and tag_margin_s), per bench. IDSSE is
+    scored against the `target` labels; Metrica always against its own (harmonized) ones."""
+    results = [{b: [] for b in BENCHES} for _ in settings]
     margins = sorted({s["tag_margin_s"] for s in settings})
     for (bench, match, seed), it in items.items():
+        gt = it["gt"][target if bench == "idsse" else "harmonized"]
         for margin in margins:
             idx = [i for i, s in enumerate(settings) if s["tag_margin_s"] == margin]
             costs = [[settings[i][c] for c in COSTS] for i in idx]
             for i, pred in zip(idx, decode(it["p"], it["halves"], it["tags"], costs, margin, block)):
-                results[i][bench].append(dict(score(it["gt"], pred, it["graded"]), match=match, seed=seed))
+                results[i][bench].append(dict(score(gt, pred, it["graded"]), match=match, seed=seed))
     out = []
     for rows in results:
         r = {"idsse": by_match(rows["idsse"], ("spell_f1", "macro_f1", "possessions")),
@@ -144,16 +160,16 @@ def evaluate(items, settings, block, fit_on=("idsse", "val_metrica")):
     return out
 
 
-def fit(items, block, fit_on, passes=3):
+def fit(items, block, fit_on, target, passes=3):
     """Coordinate descent over GRID from START; returns the best setting and the search trace."""
     best = dict(START)
-    best_score = evaluate(items, [best], block, fit_on)[0]
+    best_score = evaluate(items, [best], block, fit_on, target)[0]
     trace = []
     for p in range(passes):
         changed = False
         for name, values in GRID.items():
             settings = [dict(best, **{name: v}) for v in values]
-            scores = evaluate(items, settings, block, fit_on)
+            scores = evaluate(items, settings, block, fit_on, target)
             for s, r in zip(settings, scores):
                 trace.append({"pass": p + 1, "param": name, "value": s[name], "objective": r["objective"],
                               "idsse": r["idsse"]["spell_f1"], "val_metrica": r["val_metrica"]["spell_f1"]})
@@ -165,7 +181,11 @@ def fit(items, block, fit_on, passes=3):
                 best, best_score, changed = settings[i], scores[i], True
         if not changed:
             break
-    return best, best_score, trace
+    return best, trace
+
+
+def decoder_file(pred_dir, fit_on, target):
+    return os.path.join(pred_dir, "decoder_%s%s.json" % (fit_on, "_raw" if target == "raw" else ""))
 
 
 def main():
@@ -175,43 +195,53 @@ def main():
     parser.add_argument("--block", type=int, default=5, help="frames per decoding step")
     parser.add_argument("--fit-on", choices=("both", "idsse", "val_metrica"), default="both",
                         help="the bench(es) the costs are fitted on")
+    parser.add_argument("--target", choices=VERSIONS, default="harmonized",
+                        help="the IDSSE labels the costs are fitted against (Metrica: always its own)")
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
     args = parser.parse_args()
-    fit_on = ("idsse", "val_metrica") if args.fit_on == "both" else (args.fit_on,)
+    fit_on = BENCHES if args.fit_on == "both" else (args.fit_on,)
 
     with open(os.path.join(args.pred, "summary.json")) as handle:
-        labels = json.load(handle)["labels"]
+        trained_on = json.load(handle)["labels"]
     name = os.path.basename(os.path.normpath(args.pred))
     t0 = time.time()
-    items = load_bench(args.pred, args.datasets, labels)
-    print("%s: %d sequences, %s labels, block %d frames, fitted on %s" % (name, len(items), labels, args.block,
-                                                                        " + ".join(fit_on)))
-    best, scores, trace = fit(items, args.block, fit_on)
-    base = {b: [dict(smooth50(args.datasets, m, s, os.path.dirname(os.path.normpath(args.pred)))[labels], match=m)
-                for (bb, m, s) in items if bb == b] for b in ("idsse", "val_metrica")}
-    base = {"idsse": by_match(base["idsse"], ("spell_f1", "macro_f1", "possessions")),
-            "val_metrica": mean_of(base["val_metrica"], ("spell_f1", "macro_f1", "possessions"))}
-    truth = {b: by_match([dict(possessions=int(np.sum((it["gt"][1:] != it["gt"][:-1]) & np.isin(it["gt"][1:], ("H", "A")))),
-                                match=m) for (bb, m, s), it in items.items() if bb == b], ("possessions",))
-             for b in ("idsse", "val_metrica")}
+    items = load_bench(args.pred, args.datasets)
+    print("%s: %d sequences, classifier on %s labels, block %d frames, fitted on %s (IDSSE vs %s labels)" % (
+        name, len(items), trained_on, args.block, " + ".join(fit_on), args.target))
+    best, trace = fit(items, args.block, fit_on, args.target)
     print("best: %s" % ", ".join("%s %g" % kv for kv in best.items()))
-    for b in ("idsse", "val_metrica"):
-        print("  %-12s spellF1 %.3f   macroF1 %.3f   possessions %4.0f (truth %4.0f)   | smooth50 spellF1 %.3f   "
-              "macroF1 %.3f   possessions %4.0f" % (b, scores[b]["spell_f1"], scores[b]["macro_f1"], scores[b]["possessions"],
-                                                    truth[b]["possessions"], base[b]["spell_f1"], base[b]["macro_f1"],
-                                                    base[b]["possessions"]))
-    out = os.path.join(args.pred, "decoder.json" if args.fit_on == "both" else "decoder_fit-%s.json" % args.fit_on)
+
+    cache = os.path.dirname(os.path.normpath(args.pred))
+    report, log = {}, []
+    change = "%s + HMM decoder fitted on %s vs %s labels (provisional: %s)" % (
+        name, " + ".join(fit_on), args.target, ", ".join("%s %g" % kv for kv in best.items()))
+    for version in VERSIONS:
+        scores = evaluate(items, [best], args.block, BENCHES, version)[0]
+        report[version] = {"scores": {b: scores[b] for b in BENCHES}, "rows": scores["rows"]}
+        for b in BENCHES:
+            keys = [k for k in items if k[0] == b]
+            base = [dict(smooth50(args.datasets, m, s, cache)[version if b == "idsse" else "harmonized"], match=m)
+                    for _, m, s in keys]
+            base = (by_match if b == "idsse" else mean_of)(base, ("spell_f1", "macro_f1", "possessions"))
+            gt = [items[k]["gt"][version if b == "idsse" else "harmonized"] for k in keys]
+            truth = (by_match if b == "idsse" else mean_of)(
+                [dict(possessions=int(np.sum((g[1:] != g[:-1]) & np.isin(g[1:], ("H", "A")))), match=k[1])
+                 for g, k in zip(gt, keys)], ("possessions",))
+            report[version][b] = {"smooth50": base, "truth_possessions": truth["possessions"]}
+            s = scores[b]
+            print("  %-10s %-12s spellF1 %.3f   macroF1 %.3f   possessions %4.0f (truth %4.0f)   | smooth50 spellF1 %.3f"
+                  "   macroF1 %.3f" % (version, b, s["spell_f1"], s["macro_f1"], s["possessions"], truth["possessions"],
+                                       base["spell_f1"], base["macro_f1"]))
+            if b == "idsse" or version == "harmonized":
+                log.append((change, "%s/%s labels" % ("cv_idsse oof" if b == "idsse" else "val_metrica ensemble of rounds",
+                                                      version if b == "idsse" else "metrica"), s, base))
+    out = decoder_file(args.pred, args.fit_on, args.target)
     with open(out, "w") as handle:
-        json.dump({"provisional": True, "block": args.block, "labels": labels, "fit_on": fit_on, "params": best,
-                   "scores": {b: scores[b] for b in ("idsse", "val_metrica")}, "rows": scores["rows"],
-                   "smooth50": base, "truth_possessions": truth, "trace": trace}, handle, indent=2)
+        json.dump({"provisional": True, "block": args.block, "trained_on": trained_on, "fit_on": fit_on,
+                   "target": args.target, "params": best, "report": report, "trace": trace}, handle, indent=2)
     print("saved %s  (%.0f s)" % (out, time.time() - t0))
     if args.log:
-        change = "%s + HMM decoder fitted on %s (provisional: %s)" % (name, " + ".join(fit_on),
-                                                                      ", ".join("%s %g" % kv for kv in best.items()))
-        append_log([(change, "cv_idsse oof/%s labels" % labels, scores["idsse"], base["idsse"]),
-                    (change, "val_metrica ensemble of rounds/%s labels" % labels, scores["val_metrica"],
-                     base["val_metrica"])])
+        append_log(log)
 
 
 if __name__ == "__main__":
