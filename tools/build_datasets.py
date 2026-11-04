@@ -33,20 +33,23 @@ conclusion can be checked on both.
 
 Neither source is the challenge data: both are clean tracking with player identities. Every match
 is DEGRADED to look like the challenge ATD (46 anonymous slots, identity switches, noise) and a
-Smart Tagging file is SYNTHESISED from its restarts. The ball follows the pattern measured on the
-challenge ATD by tools/ball_gap_diagnostic.py -- aggregates only, no labels, run by a person
-(REAL_BALL_GAPS): no stretch without a ball shorter than ~5 s (short losses are interpolated) and
-long stretches during stoppages and, less often, with the ball in play. p_dead, r_live and the
-live stretch lengths are calibrated against those aggregates on the IDSSE TRAIN matches
-(ball_degradation.json keeps the grid). Metrica's corrected tracking has no ball during most
-stoppages already; those stretches stay missing.
+Smart Tagging file is SYNTHESISED from its restarts: SET PIECES windows of 35 s (kick-offs 5 s), as
+in the real file, with the restart at a random offset inside (TAG_OFFSET). The ball follows the pattern
+measured on the challenge ATD by tools/ball_gap_diagnostic.py -- aggregates only, no labels, run by
+a person (REAL_BALL_GAPS): no stretch without a ball shorter than ~5 s (short losses are
+interpolated) and long stretches when the ball is out (p_off), during stoppages (p_dead) and, less
+often, with the ball in play (r_live). Those are calibrated against the aggregates -- shares by
+stretch length, long stretches per half, SET PIECES preceded by one, and where the ball was last
+seen before one -- on the IDSSE TRAIN matches. Metrica's corrected tracking has no ball during most
+stoppages; a calibrated share of them (fill_dead, on the VAL_METRICA games) gets an estimated
+position, the last sighting carried to the restart point. ball_degradation.json keeps both grids.
 
-    python tools/build_datasets.py --verify          # download, build and check
+    python tools/build_datasets.py --verify          # download, build v2 and check
     python tools/build_datasets.py --selftest        # fake match (as IDSSE) + Metrica, no figshare needed
 
 Defaults: IDSSE raw XML in external/idsse_raw/, Metrica raw files in external/metrica_raw/, the
-datasets in external/datasets/ (add `external/` to .gitignore). Public data, not the challenge's:
-fine for Claude Code to read.
+datasets in external/datasets_v2/ (external/datasets/ is v1, from tag v1-ball-degradation). Public
+data, not the challenge's: fine for Claude Code to read.
 
 Output (see the README.md written into it):
 
@@ -73,6 +76,7 @@ import sys
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 
 import numpy as np
 
@@ -140,13 +144,15 @@ DEGRADE = {
     "fill_short_s": 5.0,          # shorter stretches without a ball are interpolated (real ATD: none < 2 s)
     "occlusion_share": 0.15,      # graded frames the tracker briefly loses (crowds, air, speed)
     "interp_noise_ms": 0.5,       # extra error of an interpolated ball, metres per second from a sighting
-    "p_dead": 0.6,                # calibrated: probability that a stoppage hides the ball (off the
-                                  # pitch it is always hidden: in IDSSE that covers most stoppages)
+    "p_off": 1.0,                 # calibrated: probability that a stretch with the ball off the pitch hides it
+    "p_dead": 0.6,                # calibrated: probability that a stoppage hides the ball
     "dead_start_s": (-0.5, 2.0),  # the hidden stretch starts this long after the stoppage (uniform)
     "dead_end_s": (-1.0, 1.0),    # and ends this long after the restart (uniform)
     "r_live": 0.5,                # calibrated: long stretches without a ball in play, per live minute
     "live_median_s": 15.0,        # calibrated: their median length (log-normal)
     "live_sigma": 0.7,            # calibrated: log-normal spread
+    "fill_dead": 0.0,             # calibrated for Metrica: share of the stoppages without a ball in the
+                                  # source that get an estimated position (IDSSE always has the ball)
     "ball_noise_m": 0.25,
     "ball_false_rate": 0.01,
     "air_height_m": 1.8,
@@ -163,14 +169,34 @@ DEGRADE = {
 REAL_BALL_GAPS = {
     "missing": 0.411,
     "by_length": [0.000, 0.000, 0.001, 0.060, 0.168, 0.182],   # < 1, 1-2, 2-5, 5-10, 10-30, > 30 s
-    "long_per_half": 38.5,                                      # stretches >= 10 s
-    "set_pieces_preceded": 0.842, "set_pieces_chance": 0.638,  # 57 windows
+    "long_per_half": 38.5,                                      # stretches >= 10 s (77 in all)
+    "set_pieces_preceded": 0.842, "set_pieces_chance": 0.638,  # 57 windows in the halves, median 35 s
+    "where": [0.182, 0.091, 0.091, 0.636],                     # last seen before a stretch >= 10 s: off the
+                                                                # pitch, < 2 m from a touchline / a goal line, inside
+    # Not calibrated on (they depend on TAG_OFFSET, set from the diagnostic's offset histogram):
+    "near_window_start": 0.105, "near_window": 0.513,          # stretch >= 10 s ending <= 3 s from a window start / window
+    # (stretch >= 10 s, window) pairs by end - window start, 2.5 s bins from -10 s: observed and
+    # expected with the windows shifted at random. TAG_OFFSET comes from their difference.
+    "offset_observed": [3, 0, 0, 5, 1, 8, 12, 4, 3, 1, 0, 2, 1, 1, 1, 0, 1, 2],
+    "offset_shifted": [1.6, 1.6, 1.7, 1.7, 1.6, 1.7, 1.3, 1.4, 1.6, 1.7, 1.7, 1.6, 1.5, 1.6, 1.6, 1.4, 1.7, 1.7],
 }
-BALL_GRID = {"p_dead": (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8),
-             "r_live": (0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5),
-             "live_median_s": (6.0, 8.0, 12.0, 16.0, 24.0, 32.0),
-             "live_sigma": (0.4, 0.7, 1.0, 1.3)}
-TRAIN_JITTER = {"p_dead": (0.85, 1.15), "r_live": (0.75, 1.33), "live_median_s": (0.8, 1.25)}
+BALL_GRID = {"p_off": (0.0, 0.1, 0.2, 0.3, 0.5, 1.0),
+             "p_dead": (0.2, 0.4, 0.6, 0.8, 1.0),
+             "r_live": (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0),
+             "live_median_s": (3.0, 4.0, 6.0, 8.0, 12.0, 16.0),
+             "live_sigma": (0.3, 0.4, 0.55, 0.7, 1.0)}
+FILL_GRID = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+CALIBRATION_DRAWS = 3          # degradations per match pooled for each setting
+TRAIN_JITTER = {"p_off": (0.85, 1.15), "p_dead": (0.85, 1.15), "r_live": (0.75, 1.33), "live_median_s": (0.8, 1.25)}
+# Smart Tagging: SET PIECES windows of the real file last 35 s, kick-offs 5 s. Where the restart falls
+# inside is a distribution: "uniform" (lo_s, hi_s) or "histogram" (edges_s, weights; uniform within a
+# bin). TAG_OFFSET is the excess of the diagnostic's offset histogram on the real file over the
+# shifted-window background (REAL_BALL_GAPS offset_*), in 5 s bins: all the excess lies between
+# -2.5 and 12.5 s, 2.5 s bins hold 1-12 pairs, and the gap end marks the restart within ~1 s.
+TAG_WINDOW_S = 35.0
+TAG_OFFSET = {"kind": "histogram", "edges_s": [-2.5, 2.5, 7.5, 12.5], "weights": [2.7, 17.0, 4.0]}
+TAG_KICKOFF_WINDOW_S = 5.0
+TAG_KICKOFF_OFFSET = {"kind": "uniform", "lo_s": 2.0, "hi_s": 3.0}
 # Smart Tagging recall per restart type, from the real file's counts (DATA.md) vs a typical match.
 TAG_RECALL = {"Throw-in": 0.55, "Corner Kick": 0.9, "Goal Kick": 0.55, "Free Kick": 0.25,
               "Kick Off (Start)": 1.0, "Kick Off (After Goal)": 1.0}
@@ -762,7 +788,8 @@ def ball_context(clean):
         seg = labels[a:b + 1]
         dead += [(a + p, a + q) for p, q in _true_runs(seg == "D")]
         live.append(a + np.flatnonzero(np.isin(seg, ("H", "A"))))
-    return {"n": n, "present": present, "off": off, "dead": dead, "live": live, "graded": clean["graded"]}
+    return {"n": n, "present": present, "off": off, "off_runs": _true_runs(off), "dead": dead, "live": live,
+            "graded": clean["graded"]}
 
 
 def occlusions(clean, rng, share):
@@ -786,16 +813,22 @@ def occlusions(clean, rng, share):
 
 def hidden_ball(ctx, rng, prm, occluded):
     """Frames without a ball before short stretches are filled: missing in the source, off the
-    pitch, hidden stoppages (each with probability p_dead), long stretches in play (r_live per live
-    minute, log-normal lengths) and brief occlusions."""
+    pitch (each stretch out with probability p_off), hidden stoppages (each with probability
+    p_dead), long stretches in play (r_live per live minute, log-normal lengths) and brief
+    occlusions. Every stretch draws its random numbers whether it is hidden or not, so the
+    settings compared by the calibration see the same draws."""
     n = ctx["n"]
-    missing = ~ctx["present"] | ctx["off"] | occluded
-    lo_s, hi_s = prm["dead_start_s"]
-    lo_e, hi_e = prm["dead_end_s"]
-    for p, q in ctx["dead"]:
-        if rng.random() < prm["p_dead"]:
-            a = p + int(rng.uniform(lo_s, hi_s) * FPS)
-            b = q + int(rng.uniform(lo_e, hi_e) * FPS)
+    missing = ~ctx["present"] | occluded
+    for (p, q), u in zip(ctx["off_runs"], rng.random(len(ctx["off_runs"]))):
+        if u < prm["p_off"]:
+            missing[p:q] = True
+    dead = ctx["dead"]
+    hide = rng.random(len(dead))
+    starts = rng.uniform(*prm["dead_start_s"], len(dead))
+    ends = rng.uniform(*prm["dead_end_s"], len(dead))
+    for (p, q), u, ds, de in zip(dead, hide, starts, ends):
+        if u < prm["p_dead"]:
+            a, b = p + int(ds * FPS), q + int(de * FPS)
             missing[max(a, 0):max(min(b, n), 0)] = True
     for live in ctx["live"]:
         k = rng.poisson(prm["r_live"] * len(live) / FPS / 60.0) if len(live) else 0
@@ -805,6 +838,30 @@ def hidden_ball(ctx, rng, prm, occluded):
             for f, d in zip(starts, lengths):
                 missing[f:min(f + int(d * FPS), n)] = True
     return missing
+
+
+def source_gaps(clean):
+    """[(start, end)] stretches inside a half where the source itself has no ball, mostly during a
+    stoppage, with a sighting on both sides."""
+    present = ~np.isnan(clean["ball"][:, 0])
+    dead = clean["labels"] == "D"
+    n = len(present)
+    return [(int(p), int(q)) for p, q in _true_runs(~present & clean["graded"])
+            if 0 < p and q < n and present[p - 1] and present[q] and dead[p:q].mean() >= 0.5]
+
+
+def fill_source_gaps(clean, rng, share, gaps=None):
+    """The clean ball with a share of the source's stoppage gaps (source_gaps) given an estimated
+    position: the last sighting carried in a straight line to the restart point (the next
+    sighting). Metrica's corrected tracking drops the ball in most stoppages, more often than the
+    ATD loses it there. Every gap draws its random number, as in hidden_ball."""
+    ball = clean["ball"].copy()
+    gaps = source_gaps(clean) if gaps is None else gaps
+    for (p, q), u in zip(gaps, rng.random(len(gaps))):
+        if u < share:
+            t = ((np.arange(p, q) - (p - 1)) / (q - (p - 1)))[:, None]
+            ball[p:q, :2] = ball[p - 1, :2] + t * (ball[q, :2] - ball[p - 1, :2])
+    return ball
 
 
 def short_stretches(missing, fill_s):
@@ -860,53 +917,96 @@ def jittered(prm, rng):
     out = dict(prm)
     for key, (lo, hi) in TRAIN_JITTER.items():
         out[key] = float(prm[key] * rng.uniform(lo, hi))
-    out["p_dead"] = min(out["p_dead"], 1.0)
+    out["p_off"], out["p_dead"] = min(out["p_off"], 1.0), min(out["p_dead"], 1.0)
     return out
+
+
+BALL_LOSS = ("L1(shares by stretch length) + |long per half - target| / target + |excess - target excess| "
+             "+ L1(shares of where the ball was last seen)")
 
 
 def ball_loss(pooled, target=REAL_BALL_GAPS):
     """Distance between the gap pattern of some matches and the real ATD's: L1 over the shares by
     stretch length, plus the relative error in long stretches per half, plus the error in how much
-    more often than chance a SET PIECES window is preceded by a long stretch."""
+    more often than chance a SET PIECES window is preceded by a long stretch, plus L1 over the
+    shares of where the ball was last seen before a long stretch."""
     excess = lambda p, c: (p - c) / (1 - c)                                       # noqa: E731
     lengths = float(np.sum(np.abs(np.array(pooled["by_length"]) - target["by_length"])))
     long = abs(pooled["long_per_half"][0] - target["long_per_half"]) / target["long_per_half"]
     tags = abs(excess(pooled["preceded"], pooled["chance"]) -
                excess(target["set_pieces_preceded"], target["set_pieces_chance"]))
+    where = float(np.sum(np.abs(np.array(pooled["where"]) / max(sum(pooled["where"]), 1) - target["where"])))
     return {"lengths": round(lengths, 4), "long": round(long, 4), "set_pieces": round(tags, 4),
-            "loss": round(lengths + long + tags, 4)}
+            "last_seen": round(where, 4), "loss": round(lengths + long + tags + where, 4)}
 
 
-def calibrate_ball(train):
-    """p_dead, r_live and the live stretch lengths over BALL_GRID, scored with ball_loss on the
-    IDSSE train matches (common random numbers: every setting sees the same draws)."""
+def _gap_scores(pooled):
+    return {"missing": round(pooled["missing"], 4), "by_length": [round(x, 4) for x in pooled["by_length"]],
+            "long_per_half": round(pooled["long_per_half"][0], 2), "preceded": round(pooled["preceded"], 4),
+            "chance": round(pooled["chance"], 4),
+            "where": [round(x / max(sum(pooled["where"]), 1), 4) for x in pooled["where"]]}
+
+
+def calibrate_ball(train, draws=CALIBRATION_DRAWS):
+    """p_off, p_dead, r_live and the live stretch lengths over BALL_GRID, scored with ball_loss on
+    the IDSSE train matches (sorted by id), each degraded `draws` times and pooled: one draw per
+    match leaves enough Monte Carlo noise to reorder settings within ~0.1 of loss. Common random
+    numbers: every setting sees the same draws."""
     import itertools
     import ball_gap_diagnostic as bgd
     pre = []
-    for k, c in enumerate(train):
-        rng = np.random.default_rng([12345, k])
-        windows = [(lo, hi) for lo, hi, _, _ in tag_instances(c, rng)]
-        pre.append((ball_context(c), occlusions(c, rng, DEGRADE["occlusion_share"]), windows,
-                    [(a, b) for _, a, b in c["halves"]]))
+    for k, c in enumerate(sorted(train, key=lambda c: c["match"])):
+        ctx = ball_context(c)
+        for r in range(draws):
+            rng = np.random.default_rng([12345, k, r])
+            windows = [(lo, hi) for lo, hi, _, _ in tag_instances(c, rng)]
+            pre.append((ctx, occlusions(c, rng, DEGRADE["occlusion_share"]), windows,
+                        [(a, b) for _, a, b in c["halves"]], c["ball"][:, :2], c["pitch"], [54321, k, r]))
     grid = []
     for values in itertools.product(*BALL_GRID.values()):
         prm = dict(DEGRADE, **dict(zip(BALL_GRID, values)))
         results = []
-        for k, (ctx, occluded, windows, halves) in enumerate(pre):
-            missing = hidden_ball(ctx, np.random.default_rng([54321, k]), prm, occluded)
+        for ctx, occluded, windows, halves, ball, pitch, seed in pre:
+            missing = hidden_ball(ctx, np.random.default_rng(seed), prm, occluded)
             missing &= ~short_stretches(missing, prm["fill_short_s"])
-            results.append(bgd.measure(missing, halves, windows, shift_draws=0))
+            results.append(bgd.measure(missing, halves, windows, ball, pitch, shift_draws=0))
         pooled = bgd.pool(results)
-        grid.append(dict(zip(BALL_GRID, values), **ball_loss(pooled), missing=round(pooled["missing"], 4),
-                         by_length=[round(x, 4) for x in pooled["by_length"]],
-                         long_per_half=round(pooled["long_per_half"][0], 2),
-                         preceded=round(pooled["preceded"], 4), chance=round(pooled["chance"], 4)))
+        grid.append(dict(zip(BALL_GRID, values), **ball_loss(pooled), **_gap_scores(pooled)))
     best = min(grid, key=lambda r: r["loss"])
-    return {"target": REAL_BALL_GAPS,
-            "loss": "L1(shares by stretch length) + |long per half - target| / target + |excess - target excess|",
+    return {"target": REAL_BALL_GAPS, "loss": BALL_LOSS, "draws_per_match": draws,
             "grid": grid, "best": {k: best[k] for k in BALL_GRID}, "best_scores": best,
             "note": "Targets: tools/ball_gap_diagnostic.py on the challenge ATD -- aggregates without labels, "
                     "run by a person. Calibrated on the IDSSE train matches only."}
+
+
+def calibrate_fill(refs, prm, draws=CALIBRATION_DRAWS):
+    """fill_dead for the Metrica games over FILL_GRID: the share of the stoppages without a ball in
+    the source that get an estimated position, scored with ball_loss on the val_metrica games (each
+    degraded `draws` times), with the ball parameters calibrated on IDSSE (common random numbers)."""
+    import ball_gap_diagnostic as bgd
+    refs = sorted(refs, key=lambda c: c["match"])
+    pre = []
+    for k, c in enumerate(refs):
+        gaps = source_gaps(c)
+        for r in range(draws):
+            rng = np.random.default_rng([12345, k, r])
+            windows = [(lo, hi) for lo, hi, _, _ in tag_instances(c, rng)]
+            pre.append((c, gaps, windows, [(a, b) for _, a, b in c["halves"]], [k, r]))
+    grid = []
+    for share in FILL_GRID:
+        results = []
+        for c, gaps, windows, halves, (k, r) in pre:
+            filled = dict(c, ball=fill_source_gaps(c, np.random.default_rng([777, k, r]), share, gaps))
+            occluded = occlusions(filled, np.random.default_rng([12345, k, r, 1]), prm["occlusion_share"])
+            missing = hidden_ball(ball_context(filled), np.random.default_rng([54321, k, r]), prm, occluded)
+            missing &= ~short_stretches(missing, prm["fill_short_s"])
+            results.append(bgd.measure(missing, halves, windows, filled["ball"][:, :2], c["pitch"], shift_draws=0))
+        pooled = bgd.pool(results)
+        grid.append(dict(fill_dead=share, **ball_loss(pooled), **_gap_scores(pooled)))
+    best = min(grid, key=lambda r: r["loss"])
+    return {"loss": BALL_LOSS, "draws_per_match": draws, "grid": grid, "best": {"fill_dead": best["fill_dead"]},
+            "best_scores": best, "source_gaps": [len(source_gaps(c)) for c in refs], "games": [c["match"] for c in refs],
+            "note": "Calibrated on the val_metrica games only, the other ball parameters fixed at the IDSSE values."}
 
 
 def degrade_players(clean, rng, prm):
@@ -1018,14 +1118,38 @@ def restarts_of(clean):
     return out
 
 
-def tag_instances(clean, rng):
-    """[(lo, hi, code, labels)] SET PIECES windows around the restarts, as the real file has them."""
+def tag_offset(rng, dist=TAG_OFFSET):
+    """Seconds from the start of a SET PIECES window to its restart, drawn from TAG_OFFSET."""
+    if dist["kind"] == "uniform":
+        return float(rng.uniform(dist["lo_s"], dist["hi_s"]))
+    edges, weights = np.asarray(dist["edges_s"], dtype=float), np.asarray(dist["weights"], dtype=float)
+    k = int(rng.choice(len(weights), p=weights / weights.sum()))
+    return float(rng.uniform(edges[k], edges[k + 1]))
+
+
+def describe_offset(dist):
+    """TAG_OFFSET in words, for the README."""
+    if dist["kind"] == "uniform":
+        text = "uniforme entre %g y %g s" % (dist["lo_s"], dist["hi_s"])
+    else:
+        w = np.asarray(dist["weights"], dtype=float)
+        text = "histograma por tramos de %s s con pesos %s" % (
+            ", ".join("%g–%g" % (a, b) for a, b in zip(dist["edges_s"][:-1], dist["edges_s"][1:])),
+            ", ".join("%.2f" % x for x in w / w.sum()))
+    return text + (" (**provisional**)" if dist.get("provisional") else "")
+
+
+def tag_instances(clean, rng, offset=TAG_OFFSET):
+    """[(lo, hi, code, labels)] SET PIECES windows around the restarts, as the real file has them:
+    TAG_WINDOW_S long with the restart TAG_OFFSET after the start, kick-offs TAG_KICKOFF_WINDOW_S
+    long with the restart TAG_KICKOFF_OFFSET after it."""
     names = (clean["home"], clean["away"])
     half_name = {1: "1st Half", 2: "2nd Half"}
 
     def half_of(f):
         return next((h for h, a, b in clean["halves"] if a <= f <= b), 1)
 
+    width = int(round(TAG_WINDOW_S * FPS))
     instances = []
     for f, team, kind in restarts_of(clean):
         if rng.random() >= TAG_RECALL[kind]:
@@ -1034,12 +1158,14 @@ def tag_instances(clean, rng):
             label = "N/A"                                   # every throw-in in the real file
         else:
             label = names[team if rng.random() >= TAG_WRONG_TEAM else 1 - team]
-        lo, hi = f - int(rng.uniform(2, 3) * FPS), f + int(rng.uniform(2, 3) * FPS)
+        kickoff = kind.startswith("Kick Off")
+        lo = max(f - int(round(tag_offset(rng, TAG_KICKOFF_OFFSET if kickoff else offset) * FPS)), 0)
+        hi = lo + (int(round(TAG_KICKOFF_WINDOW_S * FPS)) if kickoff else width)
         instances.append((lo, hi, "SET PIECES", {"Team": label, "Half": half_name[half_of(f)], "Type": kind}))
     live = np.flatnonzero(np.isin(clean["labels"], ("H", "A")))
     for f in rng.choice(live, size=int(TAG_FALSE * len(instances)), replace=False):
-        lo = int(f) - int(rng.uniform(2, 3) * FPS)
-        instances.append((lo, lo + int(rng.uniform(4, 6) * FPS), "SET PIECES",
+        lo = max(int(f) - int(round(tag_offset(rng, offset) * FPS)), 0)
+        instances.append((lo, lo + width, "SET PIECES",
                           {"Team": names[int(rng.integers(2))], "Half": half_name[half_of(int(f))], "Type": "Free Kick"}))
     instances.sort(key=lambda i: i[0])
     return instances
@@ -1099,12 +1225,17 @@ def write_match(clean, out_dir, seeds, prm, harmonization, jitter=False):
 
     rows = []
     ctx = ball_context(clean)
+    gaps = source_gaps(clean) if prm["fill_dead"] > 0 else []
     for seed in seeds:
-        key = int.from_bytes(clean["match"].encode(), "little") % (2 ** 32)
+        key = zlib.crc32(clean["match"].encode())               # v1 used the first 4 bytes: "J03W" for every IDSSE match
         rng = np.random.default_rng([seed, key])
         t0 = time.time()
         prm_s = jittered(prm, np.random.default_rng([seed, key, 7])) if jitter else prm
-        ball, already = degrade_ball(clean, rng, prm_s, ctx)
+        filled, ctx_s = clean, ctx
+        if gaps:
+            filled = dict(clean, ball=fill_source_gaps(clean, np.random.default_rng([seed, key, 11]), prm_s["fill_dead"], gaps))
+            ctx_s = ball_context(filled)
+        ball, _ = degrade_ball(filled, rng, prm_s, ctx_s)
         slots, slot_team = degrade_players(clean, rng, prm)
         tags, n_tags = synth_tagging(clean, rng)
         sub = os.path.join(folder, "seed%d" % seed)
@@ -1119,13 +1250,16 @@ def write_match(clean, out_dir, seeds, prm, harmonization, jitter=False):
         stats = {"ball_visible_graded": round(float(np.mean(~np.isnan(ball[g, 0]))), 4),
                  "ball_visible_live": round(float(np.mean(~np.isnan(ball[alive, 0]))), 4),
                  "ball_visible_dead": round(float(np.mean(~np.isnan(ball[dead, 0]))), 4),
-                 "ball_missing_in_source_graded": round(already, 4),
+                 "ball_missing_in_source_graded": round(float(np.mean(~ctx["present"][g])), 4),
+                 "ball_filled_graded": round(float(np.mean((ctx_s["present"] & ~ctx["present"])[g])), 4),
                  "mean_tracked_objects_graded": round(float(np.mean(np.sum(~np.isnan(slots[g, :, 0]), axis=1))), 2),
                  "smart_tagging_instances": n_tags,
                  "targets_from_DATA_md": {"ball_visible_graded": 0.593, "mean_tracked_objects_graded": 20.5}}
         with open(os.path.join(sub, "degradation.json"), "w") as handle:
             json.dump({"seed": seed, "parameters": prm_s, "tag_recall": TAG_RECALL, "tag_wrong_team": TAG_WRONG_TEAM,
-                       "tag_false": TAG_FALSE, "stats": stats}, handle, indent=2)
+                       "tag_false": TAG_FALSE, "tag_window_s": TAG_WINDOW_S, "tag_offset": TAG_OFFSET,
+                       "tag_kickoff_window_s": TAG_KICKOFF_WINDOW_S, "tag_kickoff_offset": TAG_KICKOFF_OFFSET,
+                       "stats": stats}, handle, indent=2)
         rows.append(dict(stats, seed=seed))
         print("    seed %d: ball visible %.1f%% (live %.1f%%, dead %.1f%%), %.1f objects, %d tags   (%.0f s)" % (
             seed, 100 * stats["ball_visible_graded"], 100 * stats["ball_visible_live"], 100 * stats["ball_visible_dead"],
@@ -1231,9 +1365,30 @@ def clean_from_fake(truth_path):
 # README
 # ==================================================================================================
 
-README = """# Datasets para More than a Hack 2027 (fase 1)
+README = """# Datasets v2 para More than a Hack 2027 (fase 1)
 
 Generado por `tools/build_datasets.py` el {date}. Semillas de degradación: {seeds}.
+
+## Qué cambia respecto a v1
+v1 (`external/datasets/`, etiqueta git `v1-ball-degradation`) se queda como estaba. La interfaz
+(`load_match()`) y los ficheros son los mismos; cambian el balón y el Smart Tagging sintético:
+- **Ventanas SET PIECES de {tag_window:g} s** (los saques de centro, {kickoff_window:g} s), como en
+  el archivo real (en v1, ~5 s todas). La reanudación cae a una distancia del inicio de la ventana
+  sorteada de `TAG_OFFSET`: {tag_offset}. Sale del histograma del diagnóstico en el archivo real
+  (fin de los tramos sin balón ≥ 10 s menos inicio de la ventana, menos lo esperado con las ventanas
+  desplazadas al azar): todo el exceso cae entre −2,5 y 12,5 s, con el máximo en 5–7,5 s; en tramos
+  de 5 s porque son unos 24 casos. El balón reaparece en la reanudación, así que el fin del tramo
+  la marca con ~1 s de error.
+- **Balón fuera del campo**: se esconde con probabilidad `p_off` (calibrada) en vez de siempre.
+- **La calibración del balón** añade el reparto de dónde se vio el balón por última vez antes de
+  un tramo sin balón de ≥ 10 s (fuera del campo, a < 2 m de la banda, a < 2 m de la línea de
+  fondo, dentro), y las ventanas de 35 s cambian la tasa «por azar» de los SET PIECES precedidos.
+- **Metrica**: una parte de las paradas en las que su tracking corregido no tiene balón recibe una
+  posición estimada (la última vista, llevada en línea recta hasta el punto de la reanudación).
+  Esa parte, `fill_dead`, se calibra con los mismos agregados sobre val_metrica.
+
+Toda la calibración usa solo agregados sin etiquetas del ATD del reto (`REAL_BALL_GAPS`, medidos
+con `tools/ball_gap_diagnostic.py` por una persona): nunca su posesión ni sus etiquetas.
 
 ## Fuentes, licencias y cita
 - **IDSSE** (entrenamiento, validación y test): {cite_idsse}
@@ -1284,8 +1439,8 @@ la 2ª parte y {pad_after} s sin juego. Fuera de las partes la verdad es X.
 ## En qué se parece y en qué no al partido del reto
 Parecido, por construcción: 25 fps; 46 slots anónimos; jugadores que se pierden y vuelven en otro
 slot, intercambios, duplicados y ruido (~20,5 objetos de media); cambio de lado en el descanso;
-Smart Tagging solo con SET PIECES, con la proporción por tipo del archivo real y `Team = N/A` en los
-saques de banda.
+Smart Tagging solo con SET PIECES, ventanas de {tag_window:g} s ({kickoff_window:g} s los saques de centro), con la
+proporción por tipo del archivo real y `Team = N/A` en los saques de banda.
 
 **El balón** sigue el patrón medido en el ATD del reto con `tools/ball_gap_diagnostic.py`
 (agregados sin etiquetas, ejecutado por una persona: es el único uso del partido del reto en estos
@@ -1293,18 +1448,23 @@ datasets, y solo de la forma de sus huecos, nunca de la posesión). Allí no hay
 balón de menos de 2 s y casi todo el balón ausente está en tramos de más de 10 s. Así que:
 - las pérdidas cortas (< {fill_short:g} s) se **interpolan** entre la última y la siguiente posición
   vista, con un error que crece con la distancia a ellas;
-- el balón se esconde **fuera del campo**, en las **paradas** con probabilidad p_dead y en **tramos
-  largos con el balón en juego** (r_live por minuto vivo, duraciones log-normales);
-- p_dead, r_live y las duraciones se calibran con esos agregados sobre los partidos de **train** de
-  IDSSE (`ball_degradation.json` guarda la rejilla); en train, cada semilla toma valores algo
-  distintos alrededor de los calibrados.
+- el balón se esconde **fuera del campo** con probabilidad p_off, en las **paradas** con
+  probabilidad p_dead y en **tramos largos con el balón en juego** (r_live por minuto vivo,
+  duraciones log-normales);
+- p_off, p_dead, r_live y las duraciones se calibran con esos agregados sobre los partidos de
+  **train** de IDSSE; en train, cada semilla toma valores algo distintos alrededor de los
+  calibrados;
+- en **Metrica**, una parte fill_dead de las paradas sin balón en su tracking recibe una posición
+  estimada (la última vista, llevada hasta la reanudación), calibrada sobre **val_metrica** con los
+  demás parámetros fijos. `ball_degradation.json` guarda las dos rejillas.
 {ball_text}
 
 Distinto, y conviene recordarlo:
-- En Metrica el tracking corregido ya no tiene balón en la mayoría de las paradas: esos tramos
-  siguen sin balón, así que allí hay más paradas escondidas que en el patrón calibrado.
-- Las ventanas SET PIECES sintéticas duran ~5 s alrededor de la reanudación. Las del archivo real
-  parecen mucho más largas (lo sugiere su tasa «por azar»); el diagnóstico imprime su mediana.
+- En Metrica, las paradas que no se rellenan siguen sin balón, y la posición estimada es una
+  línea recta: el balón real se queda quieto y luego lo llevan.
+- Dónde cae la reanudación dentro de la ventana sale de unos 24 casos del archivo real, sin
+  distinguir tipos de reanudación; el resto de códigos del Smart Tagging real (fases, con la
+  etiqueta Team del equipo con el balón) no se genera.
 - La degradación es un modelo nuestro, no el tracker de Metrica.
 - No hay fases tácticas en el Smart Tagging sintético, ni vídeo, ni homografía.
 - Las etiquetas de Metrica salen de eventos: hay que revisar unos minutos a ojo antes de fiarse.
@@ -1325,14 +1485,21 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, g
         t, b = bcal["target"], bcal["best_scores"]
         cells = lambda r: " | ".join(["%.1f%%" % (100 * x) for x in r["by_length"]] + [  # noqa: E731
             "%.1f%%" % (100 * r["missing"]), "%.1f" % r["long_per_half"], "%.0f%% / %.0f%%" % (
-                100 * r["preceded"], 100 * r["chance"])])
-        ball_text = ("\nCalibración (pérdida = %s): p_dead %g, r_live %g por min vivo, mediana %g s, sigma %g.\n\n"
+                100 * r["preceded"], 100 * r["chance"]), " / ".join("%.0f%%" % (100 * x) for x in r["where"])])
+        fill = bcal.get("metrica_fill")
+        ball_text = ("\nCalibración (pérdida = %s): p_off %g, p_dead %g, r_live %g por min vivo, mediana %g s, "
+                     "sigma %g%s.\n\n"
                      "| | < 1 s | 1–2 s | 2–5 s | 5–10 s | 10–30 s | > 30 s | sin balón | tramos ≥ 10 s por parte | "
-                     "SET PIECES precedidos / azar |\n|---|---|---|---|---|---|---|---|---|---|\n"
+                     "SET PIECES precedidos / azar | visto por última vez: fuera / banda / fondo / dentro |\n"
+                     "|---|---|---|---|---|---|---|---|---|---|---|\n"
                      "| ATD del reto (objetivo) | %s |\n| IDSSE train, calibrado | %s |\n" % (
-                         bcal["loss"], *[bcal["best"][k] for k in ("p_dead", "r_live", "live_median_s", "live_sigma")],
-                         cells(dict(by_length=t["by_length"], missing=t["missing"], long_per_half=t["long_per_half"],
-                                    preceded=t["set_pieces_preceded"], chance=t["set_pieces_chance"])), cells(b)))
+                         bcal["loss"], *[bcal["best"][k] for k in ("p_off", "p_dead", "r_live", "live_median_s",
+                                                                   "live_sigma")],
+                         "; en Metrica, fill_dead %g" % fill["best"]["fill_dead"] if fill else "",
+                         cells(dict(t, preceded=t["set_pieces_preceded"], chance=t["set_pieces_chance"])), cells(b)))
+        if fill:
+            ball_text += "| val_metrica, sin rellenar | %s |\n| val_metrica, fill_dead %g | %s |\n" % (
+                cells(fill["grid"][0]), fill["best"]["fill_dead"], cells(fill["best_scores"]))
     split_table = "| partición | partidos | semillas |\n|---|---|---|\n" + "\n".join(
         "| %s | %s | %s |" % (s, ", ".join(sorted({m for m, _ in items})), seeds_per_split.get(s, 1))
         for s, items in splits.items() if items)
@@ -1404,7 +1571,8 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, g
     text = README.format(date=time.strftime("%Y-%m-%d"), seeds=seeds, cite_idsse=CITATION["idsse"],
                          cite_metrica=CITATION["metrica"], split_table=split_table, harmonization_text=htext,
                          pad_before=PAD_BEFORE_S, halftime=HALFTIME_S, pad_after=PAD_AFTER_S,
-                         fill_short=DEGRADE["fill_short_s"], ball_text=ball_text,
+                         fill_short=DEGRADE["fill_short_s"], ball_text=ball_text, tag_window=TAG_WINDOW_S,
+                         tag_offset=describe_offset(TAG_OFFSET), kickoff_window=TAG_KICKOFF_WINDOW_S,
                          stats_table="\n".join(stats), verify_text=verify_text)
     with open(os.path.join(out_dir, "README.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -1420,7 +1588,7 @@ def main():
                         help="IDSSE XML files, downloaded if missing (default: external/idsse_raw)")
     parser.add_argument("--metrica-dir", default=os.path.join(ROOT, "external", "metrica_raw"),
                         help="Metrica sample files, downloaded if missing (default: external/metrica_raw)")
-    parser.add_argument("--out", default=None, help="where to write the datasets (default: external/datasets)")
+    parser.add_argument("--out", default=None, help="where to write the datasets (default: external/datasets_v2)")
     parser.add_argument("--matches", nargs="*", default=None, help="subset of match ids (default: all ten)")
     parser.add_argument("--train-seeds", type=int, default=2, help="degradations per training match")
     parser.add_argument("--eval-seeds", type=int, default=1, help="degradations per val/test match")
@@ -1442,7 +1610,7 @@ def main():
         split_of["FAKE0"] = "train"
         wanted = ["FAKE0"] + list(METRICA)
     else:
-        out_dir = os.path.abspath(args.out or os.path.join(ROOT, "external", "datasets"))
+        out_dir = os.path.abspath(args.out or os.path.join(ROOT, "external", "datasets_v2"))
         wanted = args.matches or (list(IDSSE) + list(METRICA))
 
     for match in wanted:
@@ -1507,31 +1675,53 @@ def main():
     with open(os.path.join(out_dir, "label_harmonization.json"), "w") as handle:
         json.dump(harmonization, handle, indent=2)
 
-    # Ball degradation: calibrated against the real ATD's gap pattern on the DFL train matches.
+    # Ball degradation: calibrated against the real ATD's gap pattern on the DFL train matches, then
+    # the share of Metrica's stoppages without a ball to fill, on the val_metrica games.
     ball_train = [cleans[m] for m in dfl if split_of[m] == "train"]
+    prm_metrica = dict(prm)
     if ball_train:
         t1 = time.time()
         bcal = calibrate_ball(ball_train)
         prm.update(bcal["best"])
+        prm_metrica.update(bcal["best"])
         b = bcal["best_scores"]
         print("\nball degradation: %d settings on %d train matches vs the real ATD's aggregates  (%.0f s)" % (
             len(bcal["grid"]), len(ball_train), time.time() - t1))
-        print("    best: %s   loss %.3f (lengths %.3f, long per half %.3f, set pieces %.3f)" % (
-            ", ".join("%s %g" % (k, prm[k]) for k in BALL_GRID), b["loss"], b["lengths"], b["long"], b["set_pieces"]))
-        print("    %-26s %s" % ("", "  ".join("%6s" % x for x in ("<1 s", "1-2", "2-5", "5-10", "10-30", ">30", "miss", "long/h",
-                                                           "prec", "chance"))))
-        t = REAL_BALL_GAPS
-        for label, r in (("real ATD (target)", dict(by_length=t["by_length"], missing=t["missing"],
-                                                     long_per_half=t["long_per_half"], preceded=t["set_pieces_preceded"],
-                                                     chance=t["set_pieces_chance"])), ("IDSSE train, best", b)):
-            print("    %-26s %s" % (label, "  ".join(["%5.1f%%" % (100 * x) for x in r["by_length"]] +
-                                                    ["%5.1f%%" % (100 * r["missing"]), "%6.1f" % r["long_per_half"],
-                                                     "%5.1f%%" % (100 * r["preceded"]), "%5.1f%%" % (100 * r["chance"])])))
+        print("    best: %s   loss %.3f (lengths %.3f, long per half %.3f, set pieces %.3f, last seen %.3f)" % (
+            ", ".join("%s %g" % (k, prm[k]) for k in BALL_GRID), b["loss"], b["lengths"], b["long"], b["set_pieces"],
+            b["last_seen"]))
+        edges = [k for k, v in bcal["best"].items() if v in (min(BALL_GRID[k]), max(BALL_GRID[k]))
+                 and not (k.startswith("p_") and v in (0.0, 1.0))]
+        if edges:
+            print("    WARNING: at the edge of BALL_GRID: %s -- widen the grid" % ", ".join(edges))
+        rows = [("real ATD (target)", dict(REAL_BALL_GAPS, preceded=REAL_BALL_GAPS["set_pieces_preceded"],
+                                           chance=REAL_BALL_GAPS["set_pieces_chance"])), ("IDSSE train, best", b)]
+        refs_ball = [cleans[m] for m in cleans if split_of.get(m) == "val_metrica"]
+        if refs_ball:
+            t1 = time.time()
+            fcal = calibrate_fill(refs_ball, prm)
+            prm_metrica.update(fcal["best"])
+            bcal["metrica_fill"] = fcal
+            f = fcal["best_scores"]
+            print("metrica fill: share of %s stoppage gaps in %s filled, over %d values  (%.0f s)" % (
+                "+".join(str(n) for n in fcal["source_gaps"]), "+".join(fcal["games"]), len(fcal["grid"]),
+                time.time() - t1))
+            print("    best: fill_dead %g   loss %.3f (lengths %.3f, long per half %.3f, set pieces %.3f, last seen %.3f)" % (
+                f["fill_dead"], f["loss"], f["lengths"], f["long"], f["set_pieces"], f["last_seen"]))
+            rows += [("val_metrica, no fill", fcal["grid"][0]), ("val_metrica, best fill", f)]
+        print("    %-24s %s" % ("", " ".join("%6s" % x for x in ("<1 s", "1-2", "2-5", "5-10", "10-30", ">30", "miss",
+                                                              "long/h", "prec", "chance", "off", "touch", "goal", "in"))))
+        for label, r in rows:
+            print("    %-24s %s" % (label, " ".join(["%5.1f%%" % (100 * x) for x in r["by_length"]] +
+                                                   ["%5.1f%%" % (100 * r["missing"]), "%6.1f" % r["long_per_half"],
+                                                    "%5.1f%%" % (100 * r["preceded"]), "%5.1f%%" % (100 * r["chance"])] +
+                                                   ["%5.1f%%" % (100 * x) for x in r["where"]])))
         with open(os.path.join(out_dir, "ball_degradation.json"), "w") as handle:
-            json.dump(dict(bcal, train_jitter=TRAIN_JITTER, fixed={k: v for k, v in DEGRADE.items()
-                                                                  if k in ("fill_short_s", "occlusion_share",
-                                                                           "interp_noise_ms", "dead_start_s",
-                                                                           "dead_end_s")}), handle, indent=1)
+            json.dump(dict(bcal, train_jitter=TRAIN_JITTER, tag_window_s=TAG_WINDOW_S, tag_offset=TAG_OFFSET,
+                           tag_kickoff_window_s=TAG_KICKOFF_WINDOW_S, tag_kickoff_offset=TAG_KICKOFF_OFFSET,
+                           fixed={k: v for k, v in DEGRADE.items()
+                                  if k in ("fill_short_s", "occlusion_share", "interp_noise_ms", "dead_start_s",
+                                           "dead_end_s")}), handle, indent=1)
     else:
         print("\n(no DFL train matches: ball degradation with the default parameters, not calibrated)")
 
@@ -1544,7 +1734,7 @@ def main():
         split = split_of[match]
         seeds = list(range(seeds_per_split[split]))
         print("%s  writing (%s)" % (match, split))
-        meta, rows = write_match(clean, out_dir, seeds, prm,
+        meta, rows = write_match(clean, out_dir, seeds, prm_metrica if clean["source"] == "metrica" else prm,
                                  rule if clean["source"] != "metrica" else
                                  dict(rule, rule=None, note="reference labels: control rule not applied"),
                                  jitter=split == "train")
