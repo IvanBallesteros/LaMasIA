@@ -17,19 +17,23 @@ Feature groups, any of which can be left out:
              datasets now copy the real ATD's pattern (tools/ball_gap_diagnostic.py), but only its
              aggregates; keep comparing against a model without this group.
     tags     Smart Tagging SET PIECES windows
+    memory   inside a gap: who was near the ball, and where it was, on each side of the gap. NaN
+             where the ball is seen. Depends on where the tracker loses the ball, like gap.
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags")
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory")
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
 MAX_BALL_MS = 40.0           # the hardest shots stay below this
 CONTEXT_S = (0.5, 2.0, 5.0)  # half-widths of the centred windows
 TAG_HORIZON_S = 30.0
+GAP_EDGE_S = 1.0             # seconds of seen ball that describe each side of a gap
+GAP_EDGE_BALL = ("x_home_attack", "to_touchline", "to_goalline")
 COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
@@ -39,6 +43,8 @@ COLUMNS = {
                 "territory_away", "advance_home", "advance_away", "speed_all_2s"],
     "gap": ["ball_seen", "gap_since_s", "gap_until_s", "gap_length_s"] + ["ball_seen_%gs" % s for s in CONTEXT_S],
     "tags": ["in_set_piece", "set_piece_team", "to_set_piece_s"],
+    "memory": ["mem_last_home", "mem_next_home", "mem_same", "mem_blend"]
+              + ["mem_%s_%s" % (side, c) for side in ("last", "next") for c in GAP_EDGE_BALL],
 }
 
 
@@ -87,6 +93,41 @@ def _gap_lengths(missing):
     return since.astype(np.float32), until.astype(np.float32), (since + until).astype(np.float32)
 
 
+def _gap_memory(nearest_home, ball, seen, attack, pitch, halves):
+    """The memory columns: for each frame without ball, what the seen ball said on each side of its
+    gap, within the same half. mem_last_home / mem_next_home are the share of the last / first
+    GAP_EDGE_S seconds with a home player nearest; mem_blend moves from one to the other as the gap
+    goes by, mem_same is 1 when they agree."""
+    L, W = pitch
+    n = len(seen)
+    half = int(GAP_EDGE_S * FPS) // 2
+    centred, _ = _window_mean(nearest_home, half)
+    before = np.full(n, np.nan, dtype=np.float32)
+    after = np.full(n, np.nan, dtype=np.float32)
+    before[2 * half:] = centred[half:n - half]       # frames i - 2 * half ... i
+    after[:n - 2 * half] = centred[half:n - half]    # frames i ... i + 2 * half
+    x, y = ball[:, 0], ball[:, 1]
+    at_edge = {"x_home_attack": (x - L / 2) * attack / (L / 2), "to_touchline": np.minimum(y, W - y),
+               "to_goalline": np.minimum(x, L - x)}
+    cols = {c: np.full(n, np.nan, dtype=np.float32) for c in COLUMNS["memory"]}
+    for a, b in halves:
+        idx = np.arange(a, b + 1)
+        in_half = seen[a:b + 1]
+        last = np.maximum.accumulate(np.where(in_half, idx, -1))
+        nxt = np.minimum.accumulate(np.where(in_half, idx, n)[::-1])[::-1]
+        for side, ref, values, known in (("last", last, before, last >= 0), ("next", nxt, after, nxt < n)):
+            ok = known & ~in_half
+            cols["mem_%s_home" % side][idx[ok]] = values[ref[ok]]
+            for c in GAP_EDGE_BALL:
+                cols["mem_%s_%s" % (side, c)][idx[ok]] = at_edge[c][ref[ok]]
+        ok = (last >= 0) & (nxt < n) & ~in_half
+        share = (idx[ok] - last[ok]) / (nxt[ok] - last[ok])
+        lo, hi = before[last[ok]], after[nxt[ok]]
+        cols["mem_blend"][idx[ok]] = lo * (1 - share) + hi * share
+        cols["mem_same"][idx[ok]] = 1 - np.abs(hi - lo)
+    return cols
+
+
 def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), groups=GROUPS):
     """DataFrame (one row per frame) of the requested feature groups.
 
@@ -111,7 +152,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols["ball_outside"] = np.maximum.reduce([-x, x - L, -y, y - W, np.zeros(n, dtype=np.float32)])
         cols["ball_speed_1s"], _ = _window_mean(cols["ball_speed"], FPS)
 
-    need_near = "near" in groups or "context" in groups
+    need_near = "near" in groups or "context" in groups or "memory" in groups
     if need_near:
         with np.errstate(invalid="ignore"):
             d = np.linalg.norm(players - ball[:, None, :], axis=2)
@@ -174,6 +215,9 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
             dist = (np.arange(a, b) - lo) / FPS
             to_start[a:b] = np.where(np.abs(dist) < np.abs(to_start[a:b]), dist, to_start[a:b])
         cols["in_set_piece"], cols["set_piece_team"], cols["to_set_piece_s"] = inside, team, to_start
+
+    if "memory" in groups:
+        cols.update(_gap_memory(nearest_home, ball, seen, attack, pitch, halves))
 
     assert sorted(cols) == sorted(c for g in groups for c in COLUMNS[g])
     return pd.DataFrame({k: np.asarray(v, dtype=np.float32) for k, v in cols.items()})
