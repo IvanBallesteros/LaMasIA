@@ -21,13 +21,15 @@ Feature groups, any of which can be left out:
              where the ball is seen. Depends on where the tracker loses the ball, like gap.
     edges    who was near the ball just before and just after this frame, kept apart: a centred
              window reads 0.5 right on a change of possession, these two read 1 and 0
+    touches  sharp changes of the ball's velocity next to a player: which team made the last and
+             the next one, how many in a row and how many in the last / next seconds
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges")
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches")
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
@@ -36,6 +38,10 @@ CONTEXT_S = (0.5, 2.0, 5.0)  # half-widths of the centred windows
 TAG_HORIZON_S = 30.0
 GAP_EDGE_S = 1.0             # seconds of seen ball that describe each side of a gap
 GAP_EDGE_BALL = ("x_home_attack", "to_touchline", "to_goalline")
+TOUCH_K = 8                  # frames on each side to measure the ball's velocity: shorter is tracker noise
+TOUCH_MS = 6.0               # smallest change of velocity that counts as a touch
+TOUCH_M = 2.5                # how close a player has to be
+TOUCH_WINDOW_S = 2.0
 COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
@@ -48,6 +54,8 @@ COLUMNS = {
     "memory": ["mem_last_home", "mem_next_home", "mem_same", "mem_blend"]
               + ["mem_%s_%s" % (side, c) for side in ("last", "next") for c in GAP_EDGE_BALL],
     "edges": [c % s for s in CONTEXT_S for c in ("home_past_%gs", "home_next_%gs", "home_jump_%gs", "d_diff_jump_%gs")],
+    "touches": ["tch_last_home", "tch_last_s", "tch_last_run", "tch_next_home", "tch_next_s", "tch_next_run",
+                "tch_home_past", "tch_away_past", "tch_home_next", "tch_away_next"],
 }
 
 
@@ -146,6 +154,60 @@ def _gap_memory(nearest_home, ball, seen, attack, pitch, halves):
     return cols
 
 
+def _detect_touches(ball, d_home, d_away):
+    """Frames where the ball's velocity changes sharply next to a player, and whether that player
+    is a home one."""
+    n, k = len(ball), TOUCH_K
+    before = np.full(ball.shape, np.nan, dtype=np.float32)
+    after = np.full(ball.shape, np.nan, dtype=np.float32)
+    before[k:] = (ball[k:] - ball[:-k]) / k * FPS
+    after[:-k] = (ball[k:] - ball[:-k]) / k * FPS
+    change = np.nan_to_num(np.linalg.norm(after - before, axis=1))
+    peak = change >= TOUCH_MS
+    for shift in range(1, k + 1):
+        peak[shift:] &= change[shift:] >= change[:-shift]
+        peak[:-shift] &= change[:-shift] > change[shift:]
+    with np.errstate(invalid="ignore"):
+        near = np.fmin(d_home, d_away) <= TOUCH_M
+        frames = np.flatnonzero(peak & near & ~np.isnan(d_home) & ~np.isnan(d_away))
+        return frames, d_home[frames] < d_away[frames]
+
+
+def _touch_columns(frames, home, n, halves):
+    """The touches columns, within each half. A run counts the touches of one team in a row."""
+    cols = {c: np.full(n, np.nan, dtype=np.float32) for c in COLUMNS["touches"]}
+    window = int(TOUCH_WINDOW_S * FPS)
+    for a, b in halves:
+        inside = (frames >= a) & (frames <= b)
+        f, h = frames[inside], home[inside]
+        if not len(f):
+            continue
+        back, ahead = np.ones(len(f)), np.ones(len(f))
+        for j in range(1, len(f)):
+            back[j] = back[j - 1] + 1 if h[j] == h[j - 1] else 1
+        for j in range(len(f) - 2, -1, -1):
+            ahead[j] = ahead[j + 1] + 1 if h[j] == h[j + 1] else 1
+        idx = np.arange(a, b + 1)
+        last = np.searchsorted(f, idx, side="right") - 1
+        nxt = last + 1
+        ok = last >= 0
+        cols["tch_last_home"][idx[ok]] = h[last[ok]]
+        cols["tch_last_s"][idx[ok]] = (idx[ok] - f[last[ok]]) / FPS
+        cols["tch_last_run"][idx[ok]] = back[last[ok]]
+        ok = nxt < len(f)
+        cols["tch_next_home"][idx[ok]] = h[nxt[ok]]
+        cols["tch_next_s"][idx[ok]] = (f[nxt[ok]] - idx[ok]) / FPS
+        cols["tch_next_run"][idx[ok]] = ahead[nxt[ok]]
+        count = np.concatenate(([0], np.cumsum(h)))
+        first = np.searchsorted(f, idx - window, side="right")
+        end = np.searchsorted(f, idx + window, side="right")
+        cols["tch_home_past"][idx] = count[last + 1] - count[first]
+        cols["tch_away_past"][idx] = (last + 1 - first) - cols["tch_home_past"][idx]
+        cols["tch_home_next"][idx] = count[end] - count[last + 1]
+        cols["tch_away_next"][idx] = (end - last - 1) - cols["tch_home_next"][idx]
+    return cols
+
+
 def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), groups=GROUPS):
     """DataFrame (one row per frame) of the requested feature groups.
 
@@ -170,7 +232,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols["ball_outside"] = np.maximum.reduce([-x, x - L, -y, y - W, np.zeros(n, dtype=np.float32)])
         cols["ball_speed_1s"], _ = _window_mean(cols["ball_speed"], FPS)
 
-    need_near = "near" in groups or "context" in groups or "memory" in groups or "edges" in groups
+    need_near = "near" in groups or "context" in groups or any(g in groups for g in ("memory", "edges", "touches"))
     if need_near:
         with np.errstate(invalid="ignore"):
             d = np.linalg.norm(players - ball[:, None, :], axis=2)
@@ -244,6 +306,9 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
 
     if "memory" in groups:
         cols.update(_gap_memory(nearest_home, ball, seen, attack, pitch, halves))
+
+    if "touches" in groups:
+        cols.update(_touch_columns(*_detect_touches(ball, d_home, d_away), n, halves))
 
     assert sorted(cols) == sorted(c for g in groups for c in COLUMNS[g])
     return pd.DataFrame({k: np.asarray(v, dtype=np.float32) for k, v in cols.items()})
