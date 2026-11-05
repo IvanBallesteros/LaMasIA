@@ -154,15 +154,21 @@ def _gap_memory(nearest_home, ball, seen, attack, pitch, halves):
     return cols
 
 
-def _detect_touches(ball, d_home, d_away):
-    """Frames where the ball's velocity changes sharply next to a player, and whether that player
-    is a home one."""
-    n, k = len(ball), TOUCH_K
+def velocity_change(ball):
+    """How much the ball's velocity changes at each frame, in m/s (NaN where unknown)."""
+    k = TOUCH_K
     before = np.full(ball.shape, np.nan, dtype=np.float32)
     after = np.full(ball.shape, np.nan, dtype=np.float32)
     before[k:] = (ball[k:] - ball[:-k]) / k * FPS
     after[:-k] = (ball[k:] - ball[:-k]) / k * FPS
-    change = np.nan_to_num(np.linalg.norm(after - before, axis=1))
+    return np.linalg.norm(after - before, axis=1)
+
+
+def detect_touches(ball, d_home, d_away):
+    """Frames where the ball's velocity changes sharply next to a player, and whether that player
+    is a home one."""
+    k = TOUCH_K
+    change = np.nan_to_num(velocity_change(ball))
     peak = change >= TOUCH_MS
     for shift in range(1, k + 1):
         peak[shift:] &= change[shift:] >= change[:-shift]
@@ -308,7 +314,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols.update(_gap_memory(nearest_home, ball, seen, attack, pitch, halves))
 
     if "touches" in groups:
-        cols.update(_touch_columns(*_detect_touches(ball, d_home, d_away), n, halves))
+        cols.update(_touch_columns(*detect_touches(ball, d_home, d_away), n, halves))
 
     assert sorted(cols) == sorted(c for g in groups for c in COLUMNS[g])
     return pd.DataFrame({k: np.asarray(v, dtype=np.float32) for k, v in cols.items()})
