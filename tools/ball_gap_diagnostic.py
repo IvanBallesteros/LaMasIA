@@ -3,7 +3,7 @@
 
 The decoder has to know what a stretch without a ball means. In the Metrica datasets the ball is
 missing almost only during stoppages; in the IDSSE ones the degradation hides it mostly while the
-ball is alive. This script measures the same five things on the challenge ATD and on the
+ball is alive. This script measures the same seven things on the challenge ATD and on the
 datasets, so the team can see which pattern the real match follows -- without labels:
 
     1. % of graded frames without a ball, by the length of the stretch they belong to
@@ -19,15 +19,24 @@ datasets, so the team can see which pattern the real match follows -- without la
        window -- of its start, and of anywhere in it -- next to the same % with the windows of each
        half shifted together by a random offset (circularly, 200 draws, fixed seed);
     5. where the ball was last seen before each stretch of >= 10 s: off the pitch, within 2 m of a
-       touchline, within 2 m of a goal line, or further inside.
+       touchline, within 2 m of a goal line, or further inside;
+    6. every Smart Tagging window in the file, by code and Type tag: how many, and their length
+       (median, p10-p90);
+    7. for the stretches of >= 10 s that end between 10 s before the start of a SET PIECES window
+       and the end of that window: a histogram of (end of the stretch - start of the window) in
+       bins of 2.5 s, next to the counts expected with the windows shifted at random (as in 4). A
+       stretch near two overlapping windows counts once for each. If the ball reappears at the
+       restart, this is where the restart sits inside the window.
 
     python tools/ball_gap_diagnostic.py --data-dir "$MTAH_DATA_DIR"           # the real match
     python tools/ball_gap_diagnostic.py --data-dir fake_data/seed0            # the fake match
     python tools/ball_gap_diagnostic.py --datasets external/datasets          # IDSSE and Metrica
     python tools/ball_gap_diagnostic.py --data-dir ... --datasets ...         # side by side
+    python tools/ball_gap_diagnostic.py --datasets external/datasets external/datasets_v2
 
-REAL DATA: the script prints aggregate numbers only -- no frames, no positions, no tags -- and an
-error message never includes data. Paste its output, never anything else from the data folder.
+REAL DATA: the script prints aggregate numbers only -- no frames, no positions, no single tag, only
+counts, shares and length percentiles per code and Type -- and an error message never includes
+data. --json writes the same aggregates. Paste its output, never anything else from the data folder.
 On the challenge match each half starts at its kickoff (games.py anchors): before the second-half
 kickoff the ball is dead by definition and would only add one long stretch.
 """
@@ -53,6 +62,8 @@ END_NEAR_S = 3.0
 LINE_M = 2.0
 SHIFT_DRAWS = 200
 WHERE = ("off the pitch", "< %g m from a touchline" % LINE_M, "< %g m from a goal line" % LINE_M, "inside")
+OFFSET_BIN_S = 2.5
+OFFSET_BEFORE_S = 10.0
 
 
 # ==================================================================================================
@@ -123,6 +134,7 @@ def measure(missing, halves, windows, ball=None, pitch=None, shift_draws=SHIFT_D
     near = int(END_NEAR_S * FPS)
     rng = np.random.default_rng(0)
     long_ends, near_start, near_any, shift_start, shift_any = 0, 0, 0, 0.0, 0.0
+    offsets, shift_offsets = {}, {}
     where = [0] * len(WHERE)
     for h, (a, b) in enumerate(halves):
         ends = np.array([q - a for p, q, hh in gaps if hh == h and q - p >= LONG_S * FPS and q <= b], dtype=np.int64)
@@ -131,12 +143,14 @@ def measure(missing, halves, windows, ball=None, pitch=None, shift_draws=SHIFT_D
         long_ends += len(ends)
         near_start += _ends_near(ends, [(lo, lo) for lo, _ in wins], near, m)
         near_any += _ends_near(ends, wins, near, m)
+        _offset_bins(ends, wins, offsets, 1.0)
         for _ in range(shift_draws):
             k = int(rng.integers(m))
             moved = [((lo + k) % m, (lo + k) % m + hi - lo) for lo, hi in wins]
             split = [w for lo, hi in moved for w in ([(lo, hi)] if hi < m else [(lo, m - 1), (0, hi - m)])]
             shift_start += _ends_near(ends, [(lo, lo) for lo, _ in moved], near, m) / shift_draws
             shift_any += _ends_near(ends, split, near, m) / shift_draws
+            _offset_bins(ends, [(lo, hi) for lo, hi in moved if hi < m], shift_offsets, 1.0 / shift_draws)
         if ball is not None:
             for p, q, hh in gaps:
                 if hh == h and q - p >= LONG_S * FPS and p > a:
@@ -147,7 +161,37 @@ def measure(missing, halves, windows, ball=None, pitch=None, shift_draws=SHIFT_D
             "preceded": hit / len(inside) if inside else float("nan"), "chance": chance,
             "window_lengths": [(hi - lo) / FPS for lo, hi in inside], "long_ends": long_ends,
             "near_start": near_start, "near_any": near_any, "shift_start": shift_start, "shift_any": shift_any,
-            "where": where}
+            "where": where, "offsets": offsets, "shift_offsets": shift_offsets}
+
+
+def _offset_bins(ends, windows, counts, weight):
+    """Add `weight` to counts[bin] for every (end, window) with lo - OFFSET_BEFORE_S <= end <= hi,
+    the bin of (end - lo) in OFFSET_BIN_S steps (bin k covers [k, k + 1) * OFFSET_BIN_S seconds)."""
+    if not len(ends):
+        return
+    ends = np.sort(ends)
+    before = int(OFFSET_BEFORE_S * FPS)
+    for lo, hi in windows:
+        sel = ends[np.searchsorted(ends, lo - before):np.searchsorted(ends, hi, side="right")]
+        for k in np.floor((sel - lo) / FPS / OFFSET_BIN_S).astype(int).tolist():
+            counts[k] = counts.get(k, 0.0) + weight
+
+
+def tag_lengths(instances):
+    """{(code, Type): [length in seconds]} for every instance of a Smart Tagging file;
+    instances: [(code, Type or None, start_frame, end_frame)]."""
+    out = {}
+    for code, kind, lo, hi in instances:
+        out.setdefault(((code or "?").strip().upper(), (kind or "-").strip()), []).append((hi - lo) / FPS)
+    return out
+
+
+def _sum_bins(dicts):
+    out = {}
+    for d in dicts:
+        for k, v in d.items():
+            out[k] = out.get(k, 0.0) + v
+    return out
 
 
 def pool(results):
@@ -163,6 +207,10 @@ def pool(results):
             "chance": float(np.average([r["chance"] for r in results], weights=w)),
             "window_lengths": [x for r in results for x in r["window_lengths"]],
             "where": [sum(r["where"][i] for r in results) for i in range(len(WHERE))],
+            "offsets": _sum_bins(r["offsets"] for r in results),
+            "shift_offsets": _sum_bins(r["shift_offsets"] for r in results),
+            "tags": {k: [x for r in results for x in r.get("tags", {}).get(k, [])]
+                     for k in sorted({k for r in results for k in r.get("tags", {})})},
             **{k: sum(r[k] for r in results) for k in ("long_ends", "near_start", "near_any", "shift_start", "shift_any")}}
 
 
@@ -180,9 +228,11 @@ def challenge_format(data_dir):
     pitch = tuple(games.GAMES[games.GAME]["pitch"])
     kickoffs = [games.anchor_video_frame(games.GAMES[games.GAME][k]) for k in ("kickoff", "kickoff_2nd")]
     halves = [(max(first, kick), last) for (_, first, last), kick in zip(hp.HALVES, kickoffs)]
-    windows = [(e["start_frame"], e["end_frame"]) for e in load_smart_tagging.load(games.GAME, data_dir)
-               if (e["code"] or "").strip().lower() == "set pieces"]
-    return pool([measure(np.isnan(ball[:, 0]), halves, windows, ball, pitch)])
+    events = load_smart_tagging.load(games.GAME, data_dir)
+    windows = [(e["start_frame"], e["end_frame"]) for e in events if (e["code"] or "").strip().lower() == "set pieces"]
+    result = measure(np.isnan(ball[:, 0]), halves, windows, ball, pitch)
+    result["tags"] = tag_lengths([(e["code"], e["tags"].get("Type"), e["start_frame"], e["end_frame"]) for e in events])
+    return pool([result])
 
 
 def datasets(dataset_dir):
@@ -197,14 +247,16 @@ def datasets(dataset_dir):
                 meta = json.load(handle)
             ball_cm = np.load(os.path.join(folder, "seed%d" % seed, "tracking.npz"))["ball_cm"]
             ball = np.where(ball_cm == -32768, np.nan, ball_cm / 100.0)
-            windows = []
+            instances = []
             for inst in ET.parse(os.path.join(folder, "seed%d" % seed, "smart_tagging.xml")).iter("instance"):
-                if (inst.findtext("code") or "").strip().lower() == "set pieces":
-                    windows.append((int(round(float(inst.findtext("start")) * FPS)),
-                                    int(round(float(inst.findtext("end")) * FPS))))
+                kind = next((lab.findtext("text") for lab in inst.findall("label") if lab.findtext("group") == "Type"), None)
+                instances.append((inst.findtext("code"), kind, int(round(float(inst.findtext("start")) * FPS)),
+                                  int(round(float(inst.findtext("end")) * FPS))))
+            windows = [(lo, hi) for code, _, lo, hi in instances if (code or "").strip().lower() == "set pieces"]
             halves = [(a, b) for _, a, b in meta["halves"]]
-            by_source.setdefault(meta["source"], []).append(
-                measure(np.isnan(ball[:, 0]), halves, windows, ball, tuple(meta["pitch_m"])))
+            result = measure(np.isnan(ball[:, 0]), halves, windows, ball, tuple(meta["pitch_m"]))
+            result["tags"] = tag_lengths(instances)
+            by_source.setdefault(meta["source"], []).append(result)
     return {source: pool(rs) for source, rs in sorted(by_source.items())}
 
 
@@ -214,7 +266,7 @@ def datasets(dataset_dir):
 
 def table(columns):
     names = list(columns)
-    width = max(12, *(len(n) for n in names))
+    width = max(17, *(len(n) for n in names))
 
     def line(label, cells):
         print("  %-38s %s" % (label, "  ".join("%*s" % (width, c) for c in cells)))
@@ -247,11 +299,42 @@ def table(columns):
     for i, label in enumerate(WHERE):
         line("  " + label, ["%.1f%%" % (100 * columns[n]["where"][i] / max(sum(columns[n]["where"]), 1)) for n in names])
 
+    print("\n  Smart Tagging windows by code / Type (whole file): n, length median (p10-p90; not below 5 windows)")
+    for key in sorted({k for n in names for k in columns[n]["tags"]}):
+        line("  %s / %s" % key, ["-" if not v else "%d, %.0f s" % (len(v), np.median(v)) if len(v) < 5 else
+                                 "%d, %.0f s (%.0f-%.0f)" % (len(v), np.median(v), *np.percentile(v, (10, 90)))
+                                 for v in (columns[n]["tags"].get(key, []) for n in names)])
+
+    print("\n  stretches >= %g s ending from %g s before a SET PIECES window start to its end:" % (LONG_S, OFFSET_BEFORE_S))
+    print("  end - window start, bins of %g s: count / expected with windows shifted at random" % OFFSET_BIN_S)
+    bins = sorted({k for n in names for k in list(columns[n]["offsets"]) + list(columns[n]["shift_offsets"])})
+    line("  (stretch, window) pairs", ["%d / %.1f" % (sum(columns[n]["offsets"].values()),
+                                                     sum(columns[n]["shift_offsets"].values())) for n in names])
+    for k in bins:
+        line("  [%+5.1f, %+5.1f) s" % (k * OFFSET_BIN_S, (k + 1) * OFFSET_BIN_S),
+             ["%d / %.1f" % (columns[n]["offsets"].get(k, 0), columns[n]["shift_offsets"].get(k, 0.0)) for n in names])
+
+
+def summary(column):
+    """The printed numbers of one column, without per-window lists (for --json)."""
+    c, ends = column, max(column["long_ends"], 1)
+    return {"matches": c["n"], "missing": c["missing"], "by_length": c["by_length"],
+            "long_per_half": c["long_per_half"][0], "set_pieces": c["set_pieces"], "preceded": c["preceded"],
+            "chance": c["chance"], "excess": (c["preceded"] - c["chance"]) / (1 - c["chance"]),
+            "window_median_s": float(np.median(c["window_lengths"])) if c["window_lengths"] else None,
+            "long_ends": c["long_ends"], "near_start": c["near_start"] / ends, "near_any": c["near_any"] / ends,
+            "shift_start": c["shift_start"] / ends, "shift_any": c["shift_any"] / ends,
+            "where": [x / max(sum(c["where"]), 1) for x in c["where"]],
+            "tags": {"%s / %s" % k: {"n": len(v), "median_s": float(np.median(v))} for k, v in c["tags"].items()},
+            "offset_bin_s": OFFSET_BIN_S, "offsets": {str(k): v for k, v in sorted(c["offsets"].items())},
+            "shift_offsets": {str(k): round(v, 2) for k, v in sorted(c["shift_offsets"].items())}}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-dir", default=None, help="challenge-format data (the real match, or fake_data/seed0)")
-    parser.add_argument("--datasets", default=None, help="a folder written by tools/build_datasets.py")
+    parser.add_argument("--datasets", nargs="+", default=None, help="folder(s) written by tools/build_datasets.py")
+    parser.add_argument("--json", default=None, help="also write the printed aggregates here")
     args = parser.parse_args()
     if not args.data_dir and not args.datasets:
         parser.error("give --data-dir, --datasets or both")
@@ -263,10 +346,14 @@ def main():
         except Exception as error:                                    # noqa: BLE001
             # never echo the exception text: with real data it could contain values from the files
             raise SystemExit("could not read --data-dir (%s); no details printed on purpose" % type(error).__name__)
-    if args.datasets:
-        columns.update(datasets(args.datasets))
+    for folder in args.datasets or []:
+        prefix = os.path.basename(os.path.normpath(folder)) + ":" if len(args.datasets) > 1 else ""
+        columns.update({prefix + k: v for k, v in datasets(folder).items()})
     print("ball gaps (aggregates only)")
     table(columns)
+    if args.json:
+        with open(args.json, "w") as handle:
+            json.dump({k: summary(v) for k, v in columns.items()}, handle, indent=1)
 
 
 if __name__ == "__main__":

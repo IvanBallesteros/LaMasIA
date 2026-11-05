@@ -94,13 +94,13 @@ def score_proba(gt_labels, proba, graded):
 
 def smooth50(datasets, match, seed, cache_dir):
     """The official baseline (nearest player, +/-50 frames) scored on both label versions; cached,
-    since it depends on nothing but the dataset."""
+    since it depends on nothing but the dataset -- keyed by the dataset folder too (datasets, datasets_v2)."""
     path = os.path.join(cache_dir, "smooth50.json")
     cache = {}
     if os.path.isfile(path):
         with open(path) as handle:
             cache = json.load(handle)
-    key = "%s_s%d" % (match, seed)
+    key = "%s/%s_s%d" % (os.path.basename(os.path.normpath(datasets)), match, seed)
     if key not in cache:
         import build_datasets as bd
         from baseline import smooth
