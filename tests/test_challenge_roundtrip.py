@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Round trip: a bank match written in the challenge's format reads back as the dataset holds it.
 
-    python tests/test_challenge_roundtrip.py                          # METRICA1, seed 0, datasets_v2
+    python tests/test_challenge_roundtrip.py                          # METRICA1, seed 0, the newest datasets
     python tests/test_challenge_roundtrip.py --match J03WOY --datasets external/datasets
 
 tools/export_challenge_format.py writes the match as the real bundle (ATD .xml + .txt and the
@@ -12,7 +12,7 @@ tools/heuristic_pipeline.load_tracking, which our tools use on the real match --
 the dataset's npz and XML:
 
     frames       every ATD record lands on video_frame = frame_id - 1, every graded frame is there
-    coordinates  players and ball, back in metres, within the 5 decimals the format keeps
+    coordinates  players and ball, back in metres, within the 6 decimals the export writes (< 0.1 mm)
     ball         missing on exactly the same frames
     slots        slot k is "Track k+1", in the same team
     windows      the same Smart Tagging instances as our own parser reads: frames, code and tags
@@ -35,12 +35,15 @@ ROOT = os.path.dirname(HERE)
 for sub in ("", "starter", "tools", "src"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-TOLERANCE_M = 1e-3           # 5 decimals of a 0-1 coordinate on a ~105 m pitch: <= 0.53 mm
+TOLERANCE_M = 1e-4           # 6 decimals of a 0-1 coordinate on a ~105 m pitch: <= 0.053 mm, below the
+                             # millimetres the datasets store
 
 
 def default_datasets():
-    v2 = os.path.join(ROOT, "external", "datasets_v2")
-    return v2 if os.path.isdir(v2) else os.path.join(ROOT, "external", "datasets")
+    for name in ("datasets_v2_1", "datasets_v2", "datasets"):
+        if os.path.isdir(os.path.join(ROOT, "external", name)):
+            return os.path.join(ROOT, "external", name)
+    return os.path.join(ROOT, "external", "datasets")
 
 
 def _close(a, b):

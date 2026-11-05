@@ -147,14 +147,16 @@ python tools/heuristic_pipeline.py --data-dir fake_data/seed0 --window-half 2 --
 ## Datasets de entrenamiento, validación y test (IDSSE + Metrica)
 
 ```bash
-python tools/build_datasets.py --verify      # descarga IDSSE y Metrica y genera external/datasets_v2/
+python tools/build_datasets.py --verify      # descarga IDSSE y Metrica y genera external/datasets_v2_1/
 python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metrica, sin figshare
 python tests/test_challenge_roundtrip.py     # un partido del banco en formato del reto, leído de vuelta
 ```
 
-- **Versiones**: `external/datasets_v2/` es la actual. `external/datasets/` es v1 (etiqueta git
-  `v1-ball-degradation`); no se regenera con el código actual. `train_classifier.py` y
-  `decoder.py` leen `--datasets`: pasad la carpeta explícitamente.
+- **Versiones**: `external/datasets_v2_1/` es la actual (v2.1). `external/datasets_v2/` es v2
+  (commit 34dff27) y `external/datasets/` es v1 (etiqueta git `v1-ball-degradation`); no se
+  regeneran con el código actual, pero `load_match()` los sigue leyendo (v2.1 guarda milímetros;
+  v1 y v2, centímetros). `train_classifier.py` y `decoder.py` leen `--datasets`: pasad la carpeta
+  explícitamente.
 
 - **IDSSE**: 7 partidos de la Bundesliga y la 2. Bundesliga 2022/23 (Bassek et al., Scientific
   Data 2025, CC BY 4.0), con `BallStatus` y `BallPossession` en cada frame. Uso permitido por los
@@ -182,18 +184,29 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
 - El tracking está **degradado** para parecerse al ATD (46 slots, cambios de identidad) y el
   Smart Tagging es **sintético**: solo SET PIECES, ventanas de 35 s (5 s los saques de centro) como
   en el archivo real, con la reanudación a 2,5–7,5 s del inicio en el 72% de los casos
-  (`TAG_OFFSET`, sacado del histograma del diagnóstico). Las fases tácticas del archivo real (BUILD
-  UP, PROGRESSION…) no se generan: las señales de Smart Tagging solo usan SET PIECES.
+  (`TAG_OFFSET`, sacado del histograma del diagnóstico; cada semilla de train varía los pesos) y
+  ventanas por tipo cada 90 minutos parecidas a las del archivo real (tipo de los eventos en
+  Metrica; en IDSSE, córner a < 5 m de un banderín; faltas ~1 de cada 7). Las fases tácticas del
+  archivo real (BUILD UP, PROGRESSION…) no se generan: las señales de Smart Tagging solo usan SET
+  PIECES.
 - **El balón** copia el patrón del ATD real, medido con `tools/ball_gap_diagnostic.py` (lo ejecuta
   una persona; solo agregados, sin etiquetas): ningún tramo sin balón de menos de 2 s y casi todo
-  en tramos de más de 10 s. La degradación interpola las pérdidas de menos de 5 s y esconde el
-  balón fuera del campo (p_off), en las paradas (p_dead) y en tramos largos en juego (r_live). Esos
-  valores se calibran con esos agregados, incluido dónde se vio el balón por última vez antes de
-  un tramo largo, sobre train de IDSSE (`ball_degradation.json`): es el único uso del partido del
-  reto en los datasets, y solo de la forma de sus huecos. En Metrica, una parte calibrada de las
-  paradas sin balón (fill_dead, sobre val_metrica) recibe una posición estimada. En train cada
-  semilla varía un poco alrededor de lo calibrado. Si el diagnóstico se vuelve a ejecutar, copia
-  sus números en `REAL_BALL_GAPS` y reconstruye.
+  en tramos de más de 10 s. La degradación rellena en línea recta las pérdidas de menos de 5 s
+  (oclusiones: su proporción no se puede medir en el real y varía entre semillas de train, entre
+  0,05 y 0,3) y esconde el balón fuera del campo (p_off), en las paradas (p_dead) y en tramos en
+  juego de 5 s o más (r_live). Esos valores se calibran con esos agregados, incluido dónde se vio el
+  balón por última vez antes de un tramo largo, sobre train de IDSSE y con la variación por
+  semilla incluida (`ball_degradation.json`): es el único uso del partido del reto en los
+  datasets, y solo de la forma de sus huecos y de su suavidad. En Metrica, una parte calibrada de
+  las paradas sin balón (fill_dead, sobre val_metrica) recibe una posición estimada. Si el
+  diagnóstico se vuelve a ejecutar, copia sus números en `REAL_BALL_GAPS` y reconstruye.
+- **El tracker**: las posiciones del balón y de los jugadores salen de un tracker modelo
+  (pérdidas cortas rellenas en línea recta y un suavizado gaussiano centrado, σ = 8 frames el
+  balón y 2 los jugadores), calibrado con los percentiles de la segunda diferencia del ATD real
+  (medida 8 del diagnóstico): un golpeo se reparte en ~0,6 s y la segunda diferencia mediana del
+  balón es ~1 cm. El balón lleva además un error de posición cuyo tamaño no se puede medir: varía
+  entre semillas de train (3–50 cm por eje; val/test, 26,5 cm). Cualquier umbral de velocidad o
+  aceleración ajustado con v1 o v2 (ruido de 25 cm y 12 cm por frame) no vale.
 - Es un dataset público, no del reto: **sí puedes leer `external/`**. Carga los partidos con
   `load_match()` de `tools/build_datasets.py` (`labels="raw"` para las originales).
 - Con `--verify`, comprueba por fuente y con las dos versiones de etiquetas si los baselines

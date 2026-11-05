@@ -4,3 +4,6 @@ numpy==2.5.4
 pandas==3.1.0
 scikit-learn==1.9.1
 scipy==1.18.1
+# The round-trip test (tests/test_challenge_roundtrip.py) reads a bank match back with the official
+# starter's loader, which needs kloppy at the starter's version (also in requirements-starter.txt).
+kloppy==3.18.0

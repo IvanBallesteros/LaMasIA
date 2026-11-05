@@ -3,7 +3,7 @@
 
 The decoder has to know what a stretch without a ball means. In the Metrica datasets the ball is
 missing almost only during stoppages; in the IDSSE ones the degradation hides it mostly while the
-ball is alive. This script measures the same eight things on the challenge ATD and on the
+ball is alive. This script measures the same nine things on the challenge ATD and on the
 datasets, so the team can see which pattern the real match follows -- without labels:
 
     1. % of graded frames without a ball, by the length of the stretch they belong to
@@ -35,7 +35,14 @@ datasets, so the team can see which pattern the real match follows -- without la
        frames). A tracker that fills short losses by linear interpolation leaves such stretches,
        but so does a smoothed tracker on any ball in flight or rolling: the % only counts
        interpolated frames when the visible ball is noisy, median |second difference| well above
-       LINEAR_EPS_M. Percentiles come from a histogram with log bins (~1% wide).
+       LINEAR_EPS_M. Percentiles come from a histogram with log bins (~1% wide);
+    9. how far the nearest player (either team, any slot) is from a slow ball: percentiles of that
+       distance over graded frames with a ball moving slower than SLOW_BALL_MS (central
+       difference). A position error of the ball (or of the players) moves the low percentiles: a
+       ball at someone's feet stops looking that close. Within one tracker it tells a 3 cm error
+       from a 50 cm one (p1 doubles), but the trackers' own conventions move it far more (p50 of
+       2.6 m in the clean IDSSE tracking, 0.1 m in Metrica's, which puts the ball on the carrier),
+       so on the real ATD it does not measure the error's size.
 
     python tools/ball_gap_diagnostic.py --data-dir "$MTAH_DATA_DIR"           # the real match
     python tools/ball_gap_diagnostic.py --data-dir fake_data/seed0            # the fake match
@@ -45,8 +52,9 @@ datasets, so the team can see which pattern the real match follows -- without la
     python tools/ball_gap_diagnostic.py --datasets external/datasets_v2 --clean   # + truth.npz
 
 REAL DATA: the script prints aggregate numbers only -- no frames, no positions, no single tag, only
-counts, shares, length percentiles per code and Type and percentiles of the second difference of
-the ball and the players over the whole match -- and an error message never includes
+counts, shares, length percentiles per code and Type, and percentiles over the whole match of the
+second difference of the ball and the players and of the ball's distance to the nearest player --
+and an error message never includes
 data. --json writes the same aggregates. Paste its output, never anything else from the data folder.
 On the challenge match each half starts at its kickoff (games.py anchors): before the second-half
 kickoff the ball is dead by definition and would only add one long stretch.
@@ -79,6 +87,8 @@ LINEAR_EPS_M = 0.10
 LINEAR_MIN_INNER = 3
 BALL_D2_PERCENTILES = (10, 50, 90, 95, 99, 99.9)
 PLAYER_D2_PERCENTILES = (10, 50, 90, 99)
+SLOW_BALL_MS = 5.0
+NEAREST_PERCENTILES = (1, 5, 10, 25, 50)
 D2_EDGES = np.concatenate(([0.0], np.logspace(-5, 3, 1601)))   # metres; the first bin holds exact zeros
 
 
@@ -233,7 +243,24 @@ def smoothness(ball, halves, players=None):
             d = np.linalg.norm(block[2:] - 2 * block[1:-1] + block[:-2], axis=2)
             hist += _d2_hist(d[graded[s:e, None] & np.isfinite(d)])
         out["player_d2_hist"] = hist
+        out["nearest_hist"] = nearest_player(ball, players, graded)
     return out
+
+
+def nearest_player(ball, players, graded):
+    """Measure 9: histogram (D2_EDGES bins, metres) of the distance from the ball to the nearest
+    player at graded frames with a ball slower than SLOW_BALL_MS."""
+    n = len(ball)
+    speed = np.full(n, np.nan)
+    speed[1:-1] = np.linalg.norm(ball[2:] - ball[:-2], axis=1) / 2.0 * FPS
+    idx = np.flatnonzero(graded & (np.nan_to_num(speed, nan=np.inf) < SLOW_BALL_MS))
+    hist = np.zeros(len(D2_EDGES) - 1, dtype=np.int64)
+    for s in range(0, len(idx), 20000):
+        f = idx[s:s + 20000]
+        d = np.linalg.norm(players[f].astype(np.float64) - ball[f, None, :], axis=2)
+        d = np.where(np.isnan(d), np.inf, d).min(axis=1)
+        hist += _d2_hist(d[np.isfinite(d)])
+    return hist
 
 
 def tag_lengths(instances):
@@ -271,7 +298,7 @@ def pool(results):
             "tags": {k: [x for r in results for x in r.get("tags", {}).get(k, [])]
                      for k in sorted({k for r in results for k in r.get("tags", {})})},
             **{k: sum((r[k] for r in results if k in r), np.zeros(len(D2_EDGES) - 1, dtype=np.int64))
-               for k in ("d2_hist", "player_d2_hist")},
+               for k in ("d2_hist", "player_d2_hist", "nearest_hist")},
             "linear": sum(r.get("linear", 0) for r in results), "ball_frames": sum(r.get("ball_frames", 0) for r in results),
             **{k: sum(r[k] for r in results) for k in ("long_ends", "near_start", "near_any", "shift_start", "shift_any")}}
 
@@ -304,6 +331,12 @@ def _from_cm(a):
     return out
 
 
+def _from_mm(a):
+    out = a.astype(np.float64) / 1000.0
+    out[a == -2 ** 31] = np.nan
+    return out
+
+
 def datasets(dataset_dir, clean=False):
     """Every match and seed in splits.json, pooled per source. clean: each match's clean tracking
     (truth.npz, centimetres) once instead, with its first seed's Smart Tagging."""
@@ -323,7 +356,10 @@ def datasets(dataset_dir, clean=False):
                 ball, players = _from_cm(npz["ball_cm"][:, :2]), _from_cm(npz["players_cm"])
             else:
                 npz = np.load(os.path.join(folder, "seed%d" % seed, "tracking.npz"))
-                ball, players = _from_cm(npz["ball_cm"]), _from_cm(npz["slots_cm"])
+                if "ball_mm" in npz.files:                          # v2.1 on: millimetres
+                    ball, players = _from_mm(npz["ball_mm"]), _from_mm(npz["slots_mm"])
+                else:
+                    ball, players = _from_cm(npz["ball_cm"]), _from_cm(npz["slots_cm"])
             instances = []
             for inst in ET.parse(os.path.join(folder, "seed%d" % seed, "smart_tagging.xml")).iter("instance"):
                 kind = next((lab.findtext("text") for lab in inst.findall("label") if lab.findtext("group") == "Type"), None)
@@ -383,6 +419,10 @@ def table(columns):
         line("  " + who, [""] * len(names))
         for q in qs:
             line("    p%g" % q, ["%.4f" % d2_percentile(columns[n][key], q) if columns[n][key].sum() else "-" for n in names])
+    line("  nearest player to a ball < %g m/s (9)" % SLOW_BALL_MS, [""] * len(names))
+    for q in NEAREST_PERCENTILES:
+        line("    p%g" % q, ["%.3f" % d2_percentile(columns[n]["nearest_hist"], q) if columns[n]["nearest_hist"].sum() else "-"
+                             for n in names])
     line("  ball in straight constant-speed stretches", ["%.1f%%" % (100 * columns[n]["linear"] / max(columns[n]["ball_frames"], 1))
                                                          for n in names])
 
@@ -415,6 +455,7 @@ def summary(column):
             "tags": {"%s / %s" % k: {"n": len(v), "median_s": float(np.median(v))} for k, v in c["tags"].items()},
             "ball_d2": {"p%g" % q: d2_percentile(c["d2_hist"], q) for q in BALL_D2_PERCENTILES},
             "player_d2": {"p%g" % q: d2_percentile(c["player_d2_hist"], q) for q in PLAYER_D2_PERCENTILES},
+            "nearest_player_slow_ball": {"p%g" % q: d2_percentile(c["nearest_hist"], q) for q in NEAREST_PERCENTILES},
             "linear": c["linear"] / max(c["ball_frames"], 1), "linear_eps_m": LINEAR_EPS_M,
             "offset_bin_s": OFFSET_BIN_S, "offsets": {str(k): v for k, v in sorted(c["offsets"].items())},
             "shift_offsets": {str(k): round(v, 2) for k, v in sorted(c["shift_offsets"].items())}}

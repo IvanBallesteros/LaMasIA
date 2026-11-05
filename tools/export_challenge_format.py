@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write one match of a built dataset in the challenge's file format, as if it were the real bundle.
 
-    python tools/export_challenge_format.py --datasets external/datasets_v2 --match METRICA1 --out fake_data/export
+    python tools/export_challenge_format.py --datasets external/datasets_v2_1 --match METRICA1 --out fake_data/export
 
 Writes <out>/tactical/BAR-ATH_tactical_atd.xml, BAR-ATH_tactical_atd.txt and
 BAR-ATH_tactical_smart_tagging.xml -- the names games.asset_paths() expects -- so every reader of
@@ -107,7 +107,7 @@ def write_atd_raw(path, players, ball, pitch):
     def group(xy, s):
         if xy[0] != xy[0]:
             return empty
-        return "%.5f,%.5f,%s" % (xy[0], xy[1], "NaN" if s != s else "%.3f" % s)
+        return "%.6f,%.6f,%s" % (xy[0], xy[1], "NaN" if s != s else "%.3f" % s)
 
     buffer = []
     with open(path, "w", newline="\n") as handle:
@@ -141,7 +141,7 @@ def export(datasets, match, seed, out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets_v2"))
+    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets_v2_1"))
     parser.add_argument("--match", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", required=True, help="folder that plays the role of the data bundle")
