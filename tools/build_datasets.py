@@ -51,6 +51,7 @@ the ball's error is not identifiable from them and varies between training seeds
 ball_degradation.json keeps every grid.
 
     python tools/build_datasets.py --verify          # download, build v2.1 and check
+    python tools/build_datasets.py --only-metrica --verify   # redo the Metrica games only (IDSSE kept)
     python tools/build_datasets.py --selftest        # fake match (as IDSSE) + Metrica, no figshare needed
 
 Defaults: IDSSE raw XML in external/idsse_raw/, Metrica raw files in external/metrica_raw/, the
@@ -209,8 +210,10 @@ BALL_GRID = {"p_off": (0.0, 0.1, 0.2, 0.3, 0.5, 1.0),
              "r_live": (0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0),
              "live_median_s": (0.5, 1.0, 2.0, 4.0, 8.0, 16.0),
              "live_sigma": (0.25, 0.4, 0.7, 1.0)}
-FILL_GRID = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+FILL_GRID = tuple(round(0.05 * k, 2) for k in range(21))
 CALIBRATION_DRAWS = 3          # degradations per match pooled for each setting
+FILL_DRAWS = 30                # per val_metrica game: one game's share without a ball varies by ~3 points
+                               # between draws, and there are only two games
 # The model tracker, scored on the real ATD's second-difference percentiles (REAL_BALL_GAPS ball_d2 /
 # player_d2). p10 is left out: ~0 everywhere, set by the millimetre rounding.
 TRACK_GRID_BALL = {"ball_smooth_frames": (6.0, 7.0, 8.0, 9.0, 10.0, 12.0),
@@ -1098,34 +1101,37 @@ def calibrate_ball(train, draws=CALIBRATION_DRAWS):
                     "run by a person. Calibrated on the IDSSE train matches only."}
 
 
-def calibrate_fill(refs, prm, draws=CALIBRATION_DRAWS):
+def calibrate_fill(refs, prm, draws=FILL_DRAWS):
     """fill_dead for the Metrica games over FILL_GRID: the share of the stoppages without a ball in
-    the source that get an estimated position, scored with ball_loss on the val_metrica games (each
-    degraded `draws` times), with the ball parameters calibrated on IDSSE (common random numbers)."""
+    the source that get an estimated position, scored with ball_loss on the val_metrica games. Each
+    game is fully degraded `draws` times (degrade_ball, with the parameters and the tracker
+    calibrated on IDSSE) and measured on the degraded ball, as the diagnostic does: the tracker's
+    smoothing moves where the ball is last seen. Common random numbers: every share sees the same
+    draws, and a larger share fills a superset of the stoppages."""
     import ball_gap_diagnostic as bgd
     refs = sorted(refs, key=lambda c: c["match"])
     pre = []
     for k, c in enumerate(refs):
         gaps = source_gaps(c)
         for r in range(draws):
-            rng = np.random.default_rng([12345, k, r])
-            windows = [(lo, hi) for lo, hi, _, _ in tag_instances(c, rng)]
+            windows = [(lo, hi) for lo, hi, _, _ in tag_instances(c, np.random.default_rng([12345, k, r]))]
             pre.append((c, gaps, windows, [(a, b) for _, a, b in c["halves"]], [k, r]))
     grid = []
     for share in FILL_GRID:
         results = []
         for c, gaps, windows, halves, (k, r) in pre:
             filled = dict(c, ball=fill_source_gaps(c, np.random.default_rng([777, k, r]), share, gaps))
-            occluded = occlusions(filled, np.random.default_rng([12345, k, r, 1]), prm["occlusion_share"])
-            missing = hidden_ball(ball_context(filled), np.random.default_rng([54321, k, r]), prm, occluded)
-            missing &= ~short_stretches(missing, prm["fill_short_s"])
-            results.append(bgd.measure(missing, halves, windows, filled["ball"][:, :2], c["pitch"], shift_draws=0))
+            ball, _ = degrade_ball(filled, np.random.default_rng([54321, k, r]), dict(prm, fill_dead=share),
+                                   ball_context(filled))
+            results.append(bgd.measure(np.isnan(ball[:, 0]), halves, windows, ball.astype(np.float64), c["pitch"],
+                                       shift_draws=0))
         pooled = bgd.pool(results)
         grid.append(dict(fill_dead=share, **ball_loss(pooled), **_gap_scores(pooled)))
     best = min(grid, key=lambda r: r["loss"])
     return {"loss": BALL_LOSS, "draws_per_match": draws, "grid": grid, "best": {"fill_dead": best["fill_dead"]},
             "best_scores": best, "source_gaps": [len(source_gaps(c)) for c in refs], "games": [c["match"] for c in refs],
-            "note": "Calibrated on the val_metrica games only, the other ball parameters fixed at the IDSSE values."}
+            "note": "Calibrated on the val_metrica games only, measured on the degraded ball, the other ball "
+                    "parameters and the tracker fixed at the IDSSE values."}
 
 
 TRACK_LOSS = "sum over the fitted percentiles of |log(simulated / real)|"
@@ -1486,6 +1492,19 @@ def write_match(clean, out_dir, seeds, prm, harmonization, jitter=False):
     return meta, rows
 
 
+def matches_on_disk(out_dir, names):
+    """(metas, rows) of matches already written in out_dir, as write_match returns them."""
+    metas, rows = [], []
+    for match in names:
+        with open(os.path.join(out_dir, "matches", match, "meta.json"), encoding="utf-8") as handle:
+            meta = json.load(handle)
+        metas.append(meta)
+        for seed in meta["seeds"]:
+            with open(os.path.join(out_dir, "matches", match, "seed%d" % seed, "degradation.json")) as handle:
+                rows.append(dict(json.load(handle)["stats"], seed=seed, match=match))
+    return metas, rows
+
+
 def load_match(dataset_dir, match, seed=0, labels="harmonized"):
     """Everything a pipeline needs for one match, in the same units as the challenge loader:
     metres from the top-left corner, frames on the match's own timeline. labels: 'harmonized'
@@ -1622,6 +1641,9 @@ tracker suavizado se mueve menos de un centímetro por frame.
   doble de faltas).
 - **Desplazamiento de la reanudación**: cada semilla de train sortea sus pesos de una Dirichlet
   centrada en `TAG_OFFSET` con {offset_n} observaciones.
+- **Metrica**: `fill_dead` se calibra midiendo sobre el balón ya degradado por el tracker, como el
+  diagnóstico, con {fill_draws} sorteos por partido. Con 3 sorteos y midiendo sobre el balón
+  limpio, la primera construcción de v2.1 lo llevó al borde (1,0).
 
 ## Lo que ya traía v2 (respecto a v1)
 - **Ventanas SET PIECES de {tag_window:g} s** (los saques de centro, {kickoff_window:g} s), como en
@@ -1710,7 +1732,8 @@ balón de menos de 2 s y casi todo el balón ausente está en tramos de más de 
   calibrados;
 - en **Metrica**, una parte fill_dead de las paradas sin balón en su tracking recibe una posición
   estimada (la última vista, llevada hasta la reanudación), calibrada sobre **val_metrica** con los
-  demás parámetros fijos. `ball_degradation.json` guarda las dos rejillas.
+  demás parámetros y el tracker fijos, midiendo sobre el balón ya degradado (como el diagnóstico)
+  y con {fill_draws} sorteos por partido. `ball_degradation.json` guarda las dos rejillas.
 {ball_text}
 
 Distinto, y conviene recordarlo:
@@ -1883,6 +1906,7 @@ def write_readme(out_dir, metas, rows, splits, seeds_per_split, harmonization, g
                          occ_lo=TRAIN_OCCLUSION[0], occ_hi=TRAIN_OCCLUSION[1], occ=DEGRADE["occlusion_share"],
                          live_min=DEGRADE["live_min_s"], corner=CORNER_RADIUS_M, offset_n=TAG_OFFSET_N,
                          err_lo=TRAIN_BALL_ERROR[0], err_hi=TRAIN_BALL_ERROR[1], err=DEGRADE["ball_error_m"],
+                         fill_draws=FILL_DRAWS,
                          tag_offset=describe_offset(TAG_OFFSET), kickoff_window=TAG_KICKOFF_WINDOW_S,
                          stats_table="\n".join(stats), verify_text=verify_text,
                          tag_table=tag_types_table(out_dir, metas, splits))
@@ -1909,6 +1933,9 @@ def main():
     parser.add_argument("--control-s", type=float, default=CONTROL_S, help="control rule: seconds within that distance")
     parser.add_argument("--verify", action="store_true", help="score the official baselines on every match")
     parser.add_argument("--selftest", action="store_true", help="fake match as IDSSE + the Metrica games")
+    parser.add_argument("--only-metrica", action="store_true",
+                        help="rewrite only the Metrica games of an existing --out folder, with the IDSSE calibration "
+                             "its ball_degradation.json holds; the IDSSE games, splits and labels are kept")
     args = parser.parse_args()
 
     prm = dict(DEGRADE)
@@ -1923,7 +1950,7 @@ def main():
         wanted = ["FAKE0"] + list(METRICA)
     else:
         out_dir = os.path.abspath(args.out or os.path.join(ROOT, "external", "datasets_v2_1"))
-        wanted = args.matches or (list(IDSSE) + list(METRICA))
+        wanted = list(METRICA) if args.only_metrica else args.matches or (list(IDSSE) + list(METRICA))
 
     for match in wanted:
         if match in cleans:
@@ -1984,18 +2011,30 @@ def main():
             ctrl = team_control(*ball_distances(cleans[m]), args.control_m, args.control_s)
             cleans[m]["labels"] = merge_uncontrolled(cleans[m]["labels"], cleans[m]["halves"], ctrl)
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "label_harmonization.json"), "w") as handle:
-        json.dump(harmonization, handle, indent=2)
+    if args.only_metrica:                                   # the IDSSE games keep their labels and calibration
+        with open(os.path.join(out_dir, "label_harmonization.json")) as handle:
+            harmonization = json.load(handle)
+    else:
+        with open(os.path.join(out_dir, "label_harmonization.json"), "w") as handle:
+            json.dump(harmonization, handle, indent=2)
 
     # Ball degradation: calibrated against the real ATD's gap pattern on the DFL train matches, then
-    # the share of Metrica's stoppages without a ball to fill, on the val_metrica games.
+    # the model tracker, then the share of Metrica's stoppages without a ball to fill, on the
+    # val_metrica games (degraded with the tracker).
     ball_train = [cleans[m] for m in dfl if split_of[m] == "train"]
-    prm_metrica = dict(prm)
-    if ball_train:
+    bcal = None
+    if args.only_metrica:
+        with open(os.path.join(out_dir, "ball_degradation.json")) as handle:
+            bcal = json.load(handle)
+        for best in (bcal["best"], bcal["tracking"]["ball"]["best"], bcal["tracking"]["players"]["best"]):
+            prm.update(best)
+        print("\nIDSSE calibration read from %s: %s" % (
+            os.path.join(out_dir, "ball_degradation.json"),
+            ", ".join("%s %g" % (k, prm[k]) for k in list(BALL_GRID) + list(TRACK_GRID_BALL) + list(TRACK_GRID_PLAYER))))
+    elif ball_train:
         t1 = time.time()
         bcal = calibrate_ball(ball_train)
         prm.update(bcal["best"])
-        prm_metrica.update(bcal["best"])
         b = bcal["best_scores"]
         print("\nball degradation: %d settings on %d train matches vs the real ATD's aggregates  (%.0f s)" % (
             len(bcal["grid"]), len(ball_train), time.time() - t1))
@@ -2006,33 +2045,10 @@ def main():
                  and not (k.startswith("p_") and v in (0.0, 1.0))]
         if edges:
             print("    WARNING: at the edge of BALL_GRID: %s -- widen the grid" % ", ".join(edges))
-        rows = [("real ATD (target)", dict(REAL_BALL_GAPS, preceded=REAL_BALL_GAPS["set_pieces_preceded"],
-                                           chance=REAL_BALL_GAPS["set_pieces_chance"])), ("IDSSE train, best", b)]
-        refs_ball = [cleans[m] for m in cleans if split_of.get(m) == "val_metrica"]
-        if refs_ball:
-            t1 = time.time()
-            fcal = calibrate_fill(refs_ball, prm)
-            prm_metrica.update(fcal["best"])
-            bcal["metrica_fill"] = fcal
-            f = fcal["best_scores"]
-            print("metrica fill: share of %s stoppage gaps in %s filled, over %d values  (%.0f s)" % (
-                "+".join(str(n) for n in fcal["source_gaps"]), "+".join(fcal["games"]), len(fcal["grid"]),
-                time.time() - t1))
-            print("    best: fill_dead %g   loss %.3f (lengths %.3f, long per half %.3f, set pieces %.3f, last seen %.3f)" % (
-                f["fill_dead"], f["loss"], f["lengths"], f["long"], f["set_pieces"], f["last_seen"]))
-            rows += [("val_metrica, no fill", fcal["grid"][0]), ("val_metrica, best fill", f)]
-        print("    %-24s %s" % ("", " ".join("%6s" % x for x in ("<1 s", "1-2", "2-5", "5-10", "10-30", ">30", "miss",
-                                                              "long/h", "prec", "chance", "off", "touch", "goal", "in"))))
-        for label, r in rows:
-            print("    %-24s %s" % (label, " ".join(["%5.1f%%" % (100 * x) for x in r["by_length"]] +
-                                                   ["%5.1f%%" % (100 * r["missing"]), "%6.1f" % r["long_per_half"],
-                                                    "%5.1f%%" % (100 * r["preceded"]), "%5.1f%%" % (100 * r["chance"])] +
-                                                   ["%5.1f%%" % (100 * x) for x in r["where"]])))
         t1 = time.time()
         tcal = calibrate_tracking(ball_train, prm)
         for part in ("ball", "players"):
             prm.update(tcal[part]["best"])
-            prm_metrica.update(tcal[part]["best"])
         bcal["tracking"] = tcal
         print("model tracker: second difference (m) vs the real ATD, %d + %d settings  (%.0f s)" % (
             len(tcal["ball"]["grid"]), len(tcal["players"]["grid"]), time.time() - t1))
@@ -2049,6 +2065,36 @@ def main():
             edges = [k for k in grid if b[k] in (min(grid[k]), max(grid[k])) and not (k.endswith("noise_m") and b[k] == 0)]
             if edges:
                 print("    WARNING: at the edge of the tracker grid: %s -- widen the grid" % ", ".join(edges))
+    else:
+        print("\n(no DFL train matches: ball degradation with the default parameters, not calibrated)")
+    prm_metrica = dict(prm)
+    if bcal is not None:
+        rows = [("real ATD (target)", dict(REAL_BALL_GAPS, preceded=REAL_BALL_GAPS["set_pieces_preceded"],
+                                           chance=REAL_BALL_GAPS["set_pieces_chance"])),
+                ("IDSSE train, best", bcal["best_scores"])]
+        refs_ball = [cleans[m] for m in cleans if split_of.get(m) == "val_metrica"]
+        if refs_ball:
+            t1 = time.time()
+            fcal = calibrate_fill(refs_ball, prm)
+            prm_metrica.update(fcal["best"])
+            bcal["metrica_fill"] = fcal
+            f = fcal["best_scores"]
+            print("metrica fill: share of %s stoppage gaps in %s filled, over %d values, %d draws per game  (%.0f s)" % (
+                "+".join(str(n) for n in fcal["source_gaps"]), "+".join(fcal["games"]), len(fcal["grid"]),
+                fcal["draws_per_match"], time.time() - t1))
+            print("    best: fill_dead %g   loss %.3f (lengths %.3f, missing %.3f, long per half %.3f, set pieces %.3f, "
+                  "last seen %.3f)" % (f["fill_dead"], f["loss"], f["lengths"], f["missing_err"], f["long"],
+                                       f["set_pieces"], f["last_seen"]))
+            if f["fill_dead"] in (min(FILL_GRID), max(FILL_GRID)):
+                print("    WARNING: fill_dead at the edge of FILL_GRID")
+            rows += [("val_metrica, no fill", fcal["grid"][0]), ("val_metrica, best fill", f)]
+        print("    %-24s %s" % ("", " ".join("%6s" % x for x in ("<1 s", "1-2", "2-5", "5-10", "10-30", ">30", "miss",
+                                                              "long/h", "prec", "chance", "off", "touch", "goal", "in"))))
+        for label, r in rows:
+            print("    %-24s %s" % (label, " ".join(["%5.1f%%" % (100 * x) for x in r["by_length"]] +
+                                                   ["%5.1f%%" % (100 * r["missing"]), "%6.1f" % r["long_per_half"],
+                                                    "%5.1f%%" % (100 * r["preceded"]), "%5.1f%%" % (100 * r["chance"])] +
+                                                   ["%5.1f%%" % (100 * x) for x in r["where"]])))
         with open(os.path.join(out_dir, "ball_degradation.json"), "w") as handle:
             json.dump(dict(bcal, train_jitter=TRAIN_JITTER, train_occlusion=TRAIN_OCCLUSION, tag_window_s=TAG_WINDOW_S,
                            tag_offset=TAG_OFFSET, tag_offset_n=TAG_OFFSET_N, tag_recall=TAG_RECALL,
@@ -2058,8 +2104,6 @@ def main():
                                   if k in ("fill_short_s", "occlusion_share", "dead_start_s", "dead_end_s",
                                            "live_min_s", "ball_error_m")},
                            train_ball_error=TRAIN_BALL_ERROR), handle, indent=1)
-    else:
-        print("\n(no DFL train matches: ball degradation with the default parameters, not calibrated)")
 
     seeds_per_split = {"train": args.train_seeds, "val": args.eval_seeds, "test": args.eval_seeds,
                        "val_metrica": args.eval_seeds, "test_metrica": args.eval_seeds}
@@ -2078,6 +2122,13 @@ def main():
         all_rows += [dict(r, match=match) for r in rows]
         splits[split] += [[match, s] for s in seeds]
     cleans.clear()
+    if args.only_metrica:                                   # the IDSSE games as they are on disk
+        with open(os.path.join(out_dir, "splits.json")) as handle:
+            kept = json.load(handle)
+        kept_metas, kept_rows = matches_on_disk(out_dir, [m for m in IDSSE if any(m == x for v in kept.values()
+                                                                                  for x, _ in v)])
+        metas, all_rows = kept_metas + metas, kept_rows + all_rows
+        splits = {s: (splits[s] if s in ("val_metrica", "test_metrica") else kept.get(s, [])) for s in splits}
 
     with open(os.path.join(out_dir, "splits.json"), "w") as handle:
         json.dump({k: v for k, v in splits.items() if v}, handle, indent=2)

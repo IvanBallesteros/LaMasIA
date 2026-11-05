@@ -3,6 +3,68 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
+## 2026-11-05 · Datasets v2.1: corrección de Metrica (`fill_dead` = 0,9) e IDSSE congelado (paquete A)
+
+**Qué.**
+- Solo se rehacen los partidos de Metrica (val_metrica y test_metrica), con
+  `python tools/build_datasets.py --only-metrica --verify`, que lee la calibración de IDSSE de
+  `ball_degradation.json`.
+- IDSSE queda congelado: sus 62 ficheros, `label_harmonization.json`, `splits.json` y sus filas de
+  `summary.csv` no cambian ni un byte. Una reconstrucción completa con el código actual da lo mismo.
+- `fill_dead` pasa de 1,0 a 0,9.
+- La calibración de `fill_dead` ahora:
+  - degrada cada partido entero con el tracker calibrado y mide sobre ese balón, como el
+    diagnóstico;
+  - usa 30 sorteos por partido;
+  - recorre `fill_dead` de 0 a 1 en pasos de 0,05.
+- La calibración del tracker pasa a hacerse antes que la de `fill_dead`. A IDSSE no le afecta.
+
+**Por qué estaba en el borde.**
+- **Lo que empuja.** Sin rellenar, Metrica tiene 55 % de balón ausente, 28 % en tramos de > 30 s y
+  48 tramos largos por parte, porque su tracking corregido pierde el balón en casi todas las
+  paradas. Rellenar baja los términos «balón ausente», «tramos ≥ 10 s por parte» y el de > 30 s de
+  «tramos por duración» casi sin parar hasta 1. «Visto por última vez» apenas se mueve.
+- **Ruido de sorteo.** Un partido de Metrica varía ±3 puntos de balón ausente entre sorteos; en
+  METRICA1, de 35 % a 47 %. Con 3 sorteos, `fill_dead` = 1 parecía dar el 41,1 % justo; con 30 da
+  40,3 %, por debajo del real.
+- **Medida distinta de la del diagnóstico.** «Visto por última vez» se medía sobre el balón limpio,
+  pero el diagnóstico lo mide sobre el degradado. Metrica pierde el balón cuando sale, todavía
+  rápido; el suavizado (σ = 8 frames) promedia los frames anteriores y deja la última posición
+  ~2–3 m hacia dentro.
+
+**Rejilla corregida** (val_metrica, 60 sorteos):
+
+| `fill_dead` | 0,7 | 0,75 | 0,8 | 0,85 | 0,9 | 0,95 | 1,0 |
+|---|---|---|---|---|---|---|---|
+| pérdida | 0,371 | 0,360 | 0,315 | 0,287 | **0,255** | 0,271 | 0,291 |
+
+El mínimo en 0,9 se repite en cada tercio de los sorteos.
+
+**Resultado** (Metrica; smooth50 en val_metrica con etiquetas armonizadas):
+
+| | Metrica v2 | Metrica v2.1 antes | v2.1 corregido: val_metrica | v2.1 corregido: test_metrica | v2.1 corregido: las tres | Real |
+|---|---|---|---|---|---|---|
+| sin balón | 45,3 % | 37,0 % | 42,5 % | 32,4 % | 39,1 % | 41,1 % |
+| tramos 5–10 / 10–30 / > 30 s | 9,7 / 17,1 / 18,4 | 8,5 / 15,5 / 13,0 | 7,2 / 16,8 / 18,4 | 10,5 / 14,6 / 7,3 | 8,3 / 16,0 / 14,7 | 6,0 / 16,8 / 18,2 |
+| tramos ≥ 10 s por parte | 40,3 | 36,8 | 38,2 | 32,5 | 36,3 | 38,5 |
+| visto: fuera / banda / fondo / dentro | 19/6/5/70 | 17/5/1/77 | 14/3/3/80 | 8/14/6/71 | 13/6/4/78 | 18/9/9/64 |
+| exceso sobre el azar (no se ajusta) | 46,7 % | 31,2 % | 24,7 % | 37,7 % | 27,9 % | 56,4 % |
+| smooth50 spellF1 / macroF1 | 0,246 / 0,674 | 0,262 / 0,609 | 0,263 / 0,639 | — | — | 0,243 / 0,67 |
+
+- Con etiquetas armonizadas, el orden de los baselines sigue siendo el del real en las dos
+  fuentes.
+- La segunda diferencia y las ventanas por tipo de Metrica casi no cambian (falta 6,0 cada 90 min;
+  saque de puerta 9,4).
+- El test de ida y vuelta pasa en METRICA1 y METRICA3.
+
+**Abierto.**
+- test_metrica (METRICA3) tiene menos tiempo muerto (D 32 %, frente a ~43 % en los otros dos), y
+  con la misma degradación se queda con menos balón ausente (32 %). Es una propiedad del partido.
+- «Visto por última vez» junto a una línea queda por debajo del real en todos los valores de
+  `fill_dead` (fondo ~6 % con 60 sorteos, frente a 9 %), por el suavizado en las salidas rápidas.
+- El exceso sobre el azar de Metrica (25–38 %) queda por debajo del real (56 %). Se informa, no se
+  ajusta.
+
 ## 2026-11-05 · Datasets v2.1: tracker suavizado, posiciones en mm y ventanas por tipo (paquete A)
 
 **Qué.** `tools/build_datasets.py` genera `external/datasets_v2_1/`. v2 (`external/datasets_v2/`,
@@ -98,7 +160,7 @@ Orden de los baselines (comprobación, no objetivo):
   - test: 42,1 % y 8,5 %.
 - **`live_sigma` = 0,25 está en el borde inferior de la rejilla**: los tramos en juego duran casi
   siempre 5 + ~4 s.
-- **Metrica: `fill_dead` = 1**, el máximo; se rellenan todas sus paradas sin balón.
+- **Metrica: `fill_dead` = 1**, el máximo; se rellenan todas sus paradas sin balón (corregido a 0,9: ver la entrada de arriba).
   - Queda con menos balón ausente que el real: 38,8 % en val_metrica y 33,2 % en test_metrica.
   - Casi nunca se le pierde el balón junto a la línea de fondo (1 % frente a 9 %).
   - Su exceso sobre el azar es del 31 %.
