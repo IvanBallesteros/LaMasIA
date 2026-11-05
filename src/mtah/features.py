@@ -19,13 +19,15 @@ Feature groups, any of which can be left out:
     tags     Smart Tagging SET PIECES windows
     memory   inside a gap: who was near the ball, and where it was, on each side of the gap. NaN
              where the ball is seen. Depends on where the tracker loses the ball, like gap.
+    edges    who was near the ball just before and just after this frame, kept apart: a centred
+             window reads 0.5 right on a change of possession, these two read 1 and 0
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory")
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges")
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
@@ -45,6 +47,7 @@ COLUMNS = {
     "tags": ["in_set_piece", "set_piece_team", "to_set_piece_s"],
     "memory": ["mem_last_home", "mem_next_home", "mem_same", "mem_blend"]
               + ["mem_%s_%s" % (side, c) for side in ("last", "next") for c in GAP_EDGE_BALL],
+    "edges": [c % s for s in CONTEXT_S for c in ("home_past_%gs", "home_next_%gs", "home_jump_%gs", "d_diff_jump_%gs")],
 }
 
 
@@ -66,6 +69,21 @@ def _window_mean(values, half):
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = np.where(count > 0, total / count, np.nan)
     return mean.astype(np.float32), (count / (hi - lo)).astype(np.float32)
+
+
+def _side_means(values, half):
+    """Means ignoring NaN over the `half` frames before and the `half` frames after each frame,
+    the frame itself left out."""
+    ok = ~np.isnan(values)
+    s = np.concatenate(([0.0], np.cumsum(np.where(ok, values, 0.0), dtype=np.float64)))
+    k = np.concatenate(([0.0], np.cumsum(ok, dtype=np.float64)))
+    i = np.arange(len(values))
+
+    def mean(lo, hi):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(k[hi] > k[lo], (s[hi] - s[lo]) / (k[hi] - k[lo]), np.nan).astype(np.float32)
+
+    return mean(np.maximum(i - half, 0), i), mean(i + 1, np.minimum(i + half + 1, len(values)))
 
 
 def _attack_sign(players, slot_team, halves, L):
@@ -152,7 +170,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols["ball_outside"] = np.maximum.reduce([-x, x - L, -y, y - W, np.zeros(n, dtype=np.float32)])
         cols["ball_speed_1s"], _ = _window_mean(cols["ball_speed"], FPS)
 
-    need_near = "near" in groups or "context" in groups or "memory" in groups
+    need_near = "near" in groups or "context" in groups or "memory" in groups or "edges" in groups
     if need_near:
         with np.errstate(invalid="ignore"):
             d = np.linalg.norm(players - ball[:, None, :], axis=2)
@@ -173,6 +191,14 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         for s in CONTEXT_S:
             cols["nearest_home_%gs" % s], _ = _window_mean(nearest_home, int(s * FPS))
             cols["d_diff_%gs" % s], _ = _window_mean(d_home - d_away, int(s * FPS))
+
+    if "edges" in groups:
+        for s in CONTEXT_S:
+            past, following = _side_means(nearest_home, int(s * FPS))
+            cols["home_past_%gs" % s], cols["home_next_%gs" % s] = past, following
+            cols["home_jump_%gs" % s] = following - past
+            past, following = _side_means(d_home - d_away, int(s * FPS))
+            cols["d_diff_jump_%gs" % s] = following - past
 
     if "players" in groups:
         v = _speed(players)
