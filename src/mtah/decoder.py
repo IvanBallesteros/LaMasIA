@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Temporal decoder: per-frame probabilities -> one H / A / D label per frame (HMM + Viterbi).
 
-    python src/mtah/decoder.py --pred external/predictions/cv_gbm_harmonized_ball-near-context-players-gap-tags --log
+    python src/mtah/decoder.py --pred external/predictions_v2_1/cv_gbm_raw_ball-near-context-players-tags --log
+
+--datasets defaults to the folder the predictions were made on (their summary.json), or else to
+the current datasets (tools/build_datasets.py DEFAULT_DATASETS), which must be built and up to
+date; predictions and datasets from different folders are refused.
 
 Three states, H, A and D. The emission of each frame is the classifier's log-probability; a path
 pays a cost (in the same log units) every time it changes state:
@@ -41,7 +45,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 for sub in ("src", "tools", "evaluation", "starter"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-from mtah.train_classifier import FPS, append_log, by_match, mean_of, score, set_pieces, smooth50  # noqa: E402
+from mtah.train_classifier import (FPS, append_log, by_match, mean_of, resolve_datasets, score,  # noqa: E402
+                                   set_pieces, smooth50)
 
 STATES = np.array(["H", "A", "D"])
 COSTS = ("switch", "to_dead", "from_dead", "from_dead_tag")
@@ -191,7 +196,8 @@ def decoder_file(pred_dir, fit_on, target):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pred", required=True, help="a train_classifier.py output folder (oof/ and val_metrica/)")
-    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets"))
+    parser.add_argument("--datasets", default=None,
+                        help="default: the folder the predictions were made on, else the current datasets (v2.1)")
     parser.add_argument("--block", type=int, default=5, help="frames per decoding step")
     parser.add_argument("--fit-on", choices=("both", "idsse", "val_metrica"), default="both",
                         help="the bench(es) the costs are fitted on")
@@ -202,7 +208,16 @@ def main():
     fit_on = BENCHES if args.fit_on == "both" else (args.fit_on,)
 
     with open(os.path.join(args.pred, "summary.json")) as handle:
-        trained_on = json.load(handle)["labels"]
+        summary = json.load(handle)
+    trained_on, made_on = summary["labels"], summary.get("datasets")
+    if made_on and args.datasets and os.path.basename(os.path.normpath(args.datasets)) != made_on:
+        raise SystemExit("%s was made on external/%s, not on %s" % (args.pred, made_on, args.datasets))
+    if made_on and args.datasets is None:
+        import build_datasets as bd
+        if made_on != os.path.basename(bd.DEFAULT_DATASETS):
+            args.datasets = os.path.join(ROOT, "external", made_on)
+    args.datasets = resolve_datasets(args.datasets)
+    print("datasets %s" % args.datasets)
     name = os.path.basename(os.path.normpath(args.pred))
     t0 = time.time()
     items = load_bench(args.pred, args.datasets)

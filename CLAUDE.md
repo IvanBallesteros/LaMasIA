@@ -152,11 +152,20 @@ python tools/build_datasets.py --selftest    # partido falso (como IDSSE) + Metr
 python tests/test_challenge_roundtrip.py     # un partido del banco en formato del reto, leído de vuelta
 ```
 
-- **Versiones**: `external/datasets_v2_1/` es la actual (v2.1). `external/datasets_v2/` es v2
-  (commit 34dff27) y `external/datasets/` es v1 (etiqueta git `v1-ball-degradation`); no se
-  regeneran con el código actual, pero `load_match()` los sigue leyendo (v2.1 guarda milímetros;
-  v1 y v2, centímetros). `train_classifier.py` y `decoder.py` leen `--datasets`: pasad la carpeta
-  explícitamente.
+- **Versiones**: `external/datasets_v2_1/` es la actual (v2.1, etiqueta git `v2.1-datasets`).
+  `external/datasets_v2/` es v2 (etiqueta `v2-datasets`, commit 34dff27) y `external/datasets/` es
+  v1 (etiqueta `v1-ball-degradation`); no se regeneran con el código actual, pero `load_match()`
+  los sigue leyendo (v2.1 guarda milímetros; v1 y v2, centímetros).
+- **v2.1 por defecto**:
+  - `train_classifier.py` y `decoder.py` leen `external/datasets_v2_1` sin pasar `--datasets`.
+  - Si no está construida o está desfasada, se paran y dicen qué ejecutar
+    (`check_datasets` en `tools/build_datasets.py`).
+  - El clasificador escribe en `external/predictions_v2_1` y apunta en su `summary.json` la carpeta
+    de datos. El decodificador usa esa misma carpeta y rechaza mezclar predicciones y datos de
+    versiones distintas.
+  - Otra versión se puede pasar a mano, para comparar, y sale un aviso.
+  - La versión actual está en un solo sitio: `DATASETS_VERSION` y `DEFAULT_DATASETS` en
+    `tools/build_datasets.py`.
 
 - **IDSSE**: 7 partidos de la Bundesliga y la 2. Bundesliga 2022/23 (Bassek et al., Scientific
   Data 2025, CC BY 4.0), con `BallStatus` y `BallPossession` en cada frame. Uso permitido por los
