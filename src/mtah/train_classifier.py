@@ -18,8 +18,8 @@ argmax, with no temporal decoding, so spellF1 is expected to be low; every row a
 official baseline (smooth50) on the same frames and labels, as a measure of how hard they are.
 test and test_metrica are never read.
 
-It reads only external/ (public datasets). The hyperparameters are library defaults plus a fixed
-seed; nothing here is tuned on val_metrica or on the challenge match.
+It reads only external/ (public datasets). The hyperparameters default to the library's, plus a
+fixed seed; --tag names a run with other values. Nothing here is tuned on the challenge match.
 """
 
 import argparse
@@ -174,7 +174,9 @@ def run(name, labels, groups, data, splits, args):
                 keep = np.flatnonzero(d["graded"] & np.isin(d["labels"][labels], CLASSES))[::args.step * len(seeds)]
                 xs.append(d["features"].iloc[keep][cols])
                 ys.append(d["labels"][labels][keep])
-        model = HistGradientBoostingClassifier(random_state=0, early_stopping=False)
+        model = HistGradientBoostingClassifier(random_state=0, early_stopping=False, learning_rate=args.learning_rate,
+                                               max_iter=args.max_iter, max_leaf_nodes=args.max_leaf_nodes,
+                                               min_samples_leaf=args.min_samples_leaf)
         model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys))
         order = [list(model.classes_).index(c) for c in CLASSES]
         for (match, seed) in [x for x in pool if x[0] == held] + metrica:
@@ -214,6 +216,7 @@ def run(name, labels, groups, data, splits, args):
         summary["val_metrica_rounds_sd"]["spell_f1"], summary["val_metrica_rounds_sd"]["macro_f1"]))
     with open(os.path.join(out, "summary.json"), "w") as handle:
         json.dump({"name": name, "labels": labels, "groups": groups, "step": args.step, "cv_matches": matches,
+                   "model": {k: getattr(args, k) for k in ("learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf")},
                    "oof": oof_rows, "val_metrica": metrica_rows, "val_metrica_ensemble": ens_rows, "summary": summary},
                   handle, indent=2)
     print("  predictions in %s  (%.0f s)" % (out, time.time() - t0))
@@ -229,6 +232,11 @@ def main():
     parser.add_argument("--without", nargs="*", default=["gap"], choices=GROUPS,
                         help="besides the model with every group, one model without each of these")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
+    parser.add_argument("--learning-rate", type=float, default=0.1)
+    parser.add_argument("--max-iter", type=int, default=100)
+    parser.add_argument("--max-leaf-nodes", type=int, default=31)
+    parser.add_argument("--min-samples-leaf", type=int, default=20)
+    parser.add_argument("--tag", default="", help="added to the run's name, for runs with other hyperparameters")
     parser.add_argument("--out", default=os.path.join(ROOT, "external", "predictions"))
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
     args = parser.parse_args()
@@ -243,7 +251,7 @@ def main():
     log = []
     for labels in args.labels:
         for groups in variants:
-            name = "cv_gbm_%s_%s" % (labels, "-".join(groups))
+            name = "cv_gbm_%s_%s%s" % (labels, "-".join(groups), "_" + args.tag if args.tag else "")
             print("\n" + name)
             log += run(name, labels, groups, data, splits, args)
     if args.log:
