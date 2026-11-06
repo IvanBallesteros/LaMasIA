@@ -23,13 +23,15 @@ Feature groups, any of which can be left out:
              window reads 0.5 right on a change of possession, these two read 1 and 0
     touches  sharp changes of the ball's velocity next to a player: which team made the last and
              the next one, how many in a row and how many in the last / next seconds
+    shape    each team's shape and movement, from the players alone, so it also speaks when the
+             ball is missing: width, depth, defensive line, forward speed and how it turns around
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches")
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches", "shape")
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
@@ -42,6 +44,8 @@ TOUCH_K = 8                  # frames on each side to measure the ball's velocit
 TOUCH_MS = 6.0               # smallest change of velocity that counts as a touch
 TOUCH_M = 2.5                # how close a player has to be
 TOUCH_WINDOW_S = 2.0
+SHAPE_SPEED_K = 12           # frames on each side to measure a player's forward speed
+SHAPE_TURN_S = 2.0           # seconds on each side to see a team turn around
 COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
@@ -56,6 +60,8 @@ COLUMNS = {
     "edges": [c % s for s in CONTEXT_S for c in ("home_past_%gs", "home_next_%gs", "home_jump_%gs", "d_diff_jump_%gs")],
     "touches": ["tch_last_home", "tch_last_s", "tch_last_run", "tch_next_home", "tch_next_s", "tch_next_run",
                 "tch_home_past", "tch_away_past", "tch_home_next", "tch_away_next"],
+    "shape": ["shape_%s_%s" % (c, team) for c in ("width", "depth", "line", "forward", "turn") for team in ("home", "away")]
+             + ["shape_gap"],
 }
 
 
@@ -152,6 +158,24 @@ def _gap_memory(nearest_home, ball, seen, attack, pitch, halves):
         cols["mem_blend"][idx[ok]] = lo * (1 - share) + hi * share
         cols["mem_same"][idx[ok]] = 1 - np.abs(hi - lo)
     return cols
+
+
+def _team_shape(players, side, sign, L):
+    """Shape columns of one team. sign: +1 where the team attacks towards x = L. x runs along the
+    team's attack from here on, so a low value is near its own goal."""
+    x = (players[:, side, 0] - L / 2) * sign[:, None]
+    y = players[:, side, 1]
+    k = SHAPE_SPEED_K
+    forward = np.full(x.shape, np.nan, dtype=np.float32)
+    forward[k:-k] = (x[2 * k:] - x[:-2 * k]) / (2 * k) * FPS
+    forward = np.where(np.abs(forward) > MAX_PLAYER_MS, np.nan, forward)
+    with np.errstate(invalid="ignore"), _quiet():
+        speed = np.nanmean(forward, axis=1).astype(np.float32)
+        out = {"width": np.nanstd(y, axis=1), "depth": np.nanstd(x, axis=1), "forward": speed}
+    out["line"] = np.sort(x, axis=1)[:, 1]            # the goalkeeper first, NaN last
+    past, following = _side_means(speed, int(SHAPE_TURN_S * FPS))
+    out["turn"] = following - past
+    return out
 
 
 def velocity_change(ball):
@@ -287,6 +311,12 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         adv_away[FPS:-FPS] = -(cx_away[2 * FPS:] - cx_away[:-2 * FPS]) / 2.0 * attack[FPS:-FPS]
         cols["advance_home"], cols["advance_away"] = adv_home, adv_away
         cols["speed_all_2s"], _ = _window_mean(cols["speed_all"].astype(np.float32), 2 * FPS)
+
+    if "shape" in groups:
+        for name, side, sign in (("home", home, attack), ("away", away, -attack)):
+            cols.update({"shape_%s_%s" % (k, name): v for k, v in _team_shape(players, side, sign, L).items()})
+        with np.errstate(invalid="ignore"), _quiet():
+            cols["shape_gap"] = (np.nanmean(players[:, home, 0], axis=1) - np.nanmean(players[:, away, 0], axis=1)) * attack
 
     if "gap" in groups:
         since, until, length = _gap_lengths(~seen)
