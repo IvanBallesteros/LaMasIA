@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Does the touch detector behave the same on the real tracking? Aggregates only, so it is safe to
-run on the real match.
+"""Do the touch and team shape features behave the same on the real tracking? Aggregates only, so it
+is safe to run on the real match.
 
 The touches group of src/mtah/features.py finds sharp changes of the ball's velocity, so it depends
-on the ball's noise, and the noise in the datasets is partly simulated. This script measures the
-same things on the challenge ATD and on the datasets, without labels:
+on the ball's noise; the shape group depends on how well the players are followed. Both are partly
+simulated in the datasets. This script measures the same things on the challenge ATD and on the
+datasets, without labels:
 
     1. % of graded frames with a ball;
     2. touches per minute of seen ball;
     3. the change of velocity on seen frames, in m/s: median, p75, p90 and p99;
-    4. % of touches by the same team as the touch before.
+    4. % of touches by the same team as the touch before;
+    5. objects per team, and new tracklets per minute (a slot that was empty and now has a player);
+    6. each team shape feature, both teams together: p10, median and p90.
 
     python tools/touch_rate_diagnostic.py --data-dir "$MTAH_DATA_DIR"     # the real match
     python tools/touch_rate_diagnostic.py --data-dir fake_data/seed0      # the fake match
@@ -32,12 +35,15 @@ ROOT = os.path.dirname(HERE)
 for sub in ("", "src", "starter", "evaluation", "tools"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-from mtah.features import FPS, detect_touches, velocity_change  # noqa: E402
+from mtah.features import FPS, detect_touches, frame_features, velocity_change  # noqa: E402
 
 PERCENTILES = (50, 75, 90, 99)
+SHAPE = ("width", "depth", "line", "forward", "turn")
+SHAPE_PERCENTILES = (10, 50, 90)
+SHAPE_STEP = 5               # one frame in five is plenty for percentiles
 
 
-def measure(players, slot_team, ball, halves):
+def measure(players, slot_team, ball, halves, pitch):
     """Counts for one match; pooled by summing them, apart from the velocity changes."""
     seen = ~np.isnan(ball[:, 0])
     graded = np.zeros(len(ball), dtype=bool)
@@ -54,9 +60,15 @@ def measure(players, slot_team, ball, halves):
     keep = graded[frames]
     frames, home = frames[keep], home[keep]
     change = velocity_change(ball)[graded & seen]
+    present = ~np.isnan(players[:, :, 0])
+    starts = (present[1:] & ~present[:-1])[graded[1:]].sum()
+    shape = frame_features(players, slot_team, ball, pitch, halves, groups=("shape",)).iloc[np.flatnonzero(graded)[::SHAPE_STEP]]
+    values = {c: np.concatenate([shape["shape_%s_%s" % (c, t)].to_numpy() for t in ("home", "away")]) for c in SHAPE}
+    values["gap"] = shape["shape_gap"].to_numpy()
     return {"graded": int(graded.sum()), "seen": int((graded & seen).sum()), "touches": len(frames),
             "same_team": int(np.sum(home[1:] == home[:-1])), "pairs": max(len(frames) - 1, 0),
-            "change": change[~np.isnan(change)]}
+            "change": change[~np.isnan(change)], "objects": float(present[graded].sum()) / 2,
+            "tracklet_starts": int(starts), "shape": values}
 
 
 def summary(rows):
@@ -66,6 +78,12 @@ def summary(rows):
            "touches_per_min_seen": sum(r["touches"] for r in rows) / (seen / FPS / 60.0),
            "same_team_pct": 100.0 * sum(r["same_team"] for r in rows) / max(sum(r["pairs"] for r in rows), 1)}
     out.update({"change_p%d_ms" % p: float(v) for p, v in zip(PERCENTILES, pct)})
+    out["objects_per_team"] = sum(r["objects"] for r in rows) / graded
+    out["new_tracklets_per_min"] = sum(r["tracklet_starts"] for r in rows) / (graded / FPS / 60.0)
+    for c in SHAPE + ("gap",):
+        values = np.concatenate([r["shape"][c] for r in rows])
+        for p, v in zip(SHAPE_PERCENTILES, np.nanpercentile(values, SHAPE_PERCENTILES)):
+            out["shape_%s_p%d" % (c, p)] = float(v)
     return out
 
 
@@ -76,7 +94,7 @@ def challenge_format(data_dir):
     players, ball, slot_team = hp.load_tracking(games.asset_paths(games.GAME, data_dir), None)
     kickoffs = [games.anchor_video_frame(games.GAMES[games.GAME][k]) for k in ("kickoff", "kickoff_2nd")]
     halves = [(max(first, kick), last) for (_, first, last), kick in zip(hp.HALVES, kickoffs)]
-    return [measure(players, np.asarray(slot_team), ball, halves)]
+    return [measure(players, np.asarray(slot_team), ball, halves, tuple(games.GAMES[games.GAME]["pitch"]))]
 
 
 def datasets(dataset_dir):
@@ -91,7 +109,7 @@ def datasets(dataset_dir):
         for match, seed in items:
             m = bd.load_match(dataset_dir, match, seed)
             halves = [(a, b) for _, a, b in m["meta"]["halves"]]
-            row = measure(m["players"], np.asarray(m["slot_team"]), m["ball"], halves)
+            row = measure(m["players"], np.asarray(m["slot_team"]), m["ball"], halves, tuple(m["meta"]["pitch_m"]))
             by_source.setdefault(m["meta"]["source"], []).append(row)
     return by_source
 
@@ -114,11 +132,11 @@ def main():
     if args.datasets:
         columns.update({k: summary(v) for k, v in datasets(args.datasets).items()})
 
-    print("touch detector (aggregates only)")
+    print("touches and team shape (aggregates only)")
     names = list(columns)
     print("%-24s %s" % ("", " ".join("%10s" % n[:10] for n in names)))
     for key in next(iter(columns.values())):
-        print("%-24s %s" % (key, " ".join("%10.1f" % columns[n][key] for n in names)))
+        print("%-24s %s" % (key, " ".join("%10.2f" % columns[n][key] for n in names)))
 
 
 if __name__ == "__main__":
