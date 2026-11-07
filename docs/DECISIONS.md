@@ -3,6 +3,45 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
+## 2026-11-07 · Clasificador: fuera el grupo `touches` (Martina)
+
+**Qué.**
+- El grupo `touches` de `src/mtah/features.py` sale del modelo: `MODEL_GROUPS` son todos los
+  grupos menos `touches`, y es lo que `train_classifier.py` usa por defecto (`--groups` permite
+  volver a ponerlo).
+- El código y `tests/test_touches.py` se quedan, sin usar, por si se prueba otro detector.
+- `tools/touch_rate_diagnostic.py` sigue midiendo toques, pero ya solo como información; lo que
+  importa de él en el partido real es la forma de los equipos y el seguimiento de los jugadores.
+
+**Por qué.**
+- Los umbrales del detector (ventana de 8 frames, 6 m/s, jugador a ≤ 2,5 m) se eligieron en v2,
+  cuyo balón llevaba 25 cm de ruido independiente por frame. En v2.1, suavizado como el ATD real
+  (un golpeo se reparte en ~0,6 s), el detector pasa de ~22 a 2,5–4 toques por minuto de balón
+  visto.
+- **Entrenamiento en v2.1** (decodificador ajustado en IDSSE, spellF1 IDSSE armonizadas / IDSSE
+  originales / val_metrica):
+
+  | modelo | con toques | sin toques |
+  |---|---|---|
+  | entrenado con armonizadas | 0,613 / 0,489 / 0,587 | 0,618 / 0,493 / 0,592 |
+  | entrenado con originales | 0,621 / 0,510 / 0,610 | 0,621 / 0,512 / 0,615 |
+
+  Diferencias ≤ 0,005, muy por debajo del ruido; el log-loss igual o algo mejor sin toques.
+- **Ningún umbral los recupera.** En los partidos de train de v2.1 (4 × 2 semillas), para
+  ventanas de 3, 5, 8 y 12 frames y umbrales de 1 a 6 m/s: la proporción de cambios de posesión
+  con un toque a ≤ 1 s es como mucho 1,1 veces la de momentos al azar, y el toque es del equipo
+  nuevo con menos frecuencia que al azar. Bajar el umbral solo encuentra más curvas suaves del
+  balón, en cualquier momento.
+- La señal que tenían en v2 venía muy probablemente del ruido simulado (no comprobado).
+
+**Con qué datos.** Solo datasets v2.1 (train para la búsqueda de umbrales; validación cruzada en
+IDSSE y val_metrica para el modelo). Nada del partido del reto.
+
+**Abierto.**
+- Los cambios de posesión siguen siendo el punto débil: el modelo predice ~247 posesiones frente a
+  315 en IDSSE y ~215 frente a 334 en Metrica. Un detector de toques tendría que mirar otra cosa
+  (por ejemplo, el cambio de dirección en una ventana más larga, o quién se acerca al balón).
+
 ## 2026-11-05 · Datasets v2.1: corrección de Metrica (`fill_dead` = 0,9) e IDSSE congelado (paquete A)
 
 **Qué.**

@@ -22,7 +22,10 @@ Feature groups, any of which can be left out:
     edges    who was near the ball just before and just after this frame, kept apart: a centred
              window reads 0.5 right on a change of possession, these two read 1 and 0
     touches  sharp changes of the ball's velocity next to a player: which team made the last and
-             the next one, how many in a row and how many in the last / next seconds
+             the next one, how many in a row and how many in the last / next seconds. Not in the
+             model (MODEL_GROUPS): on a smoothed ball, as in the real ATD and datasets v2.1, a
+             touch is spread over ~0.6 s and the detector finds no more touches near a change of
+             possession than anywhere else (docs/DECISIONS.md, 2026-11-07)
     shape    each team's shape and movement, from the players alone, so it also speaks when the
              ball is missing: width, depth, defensive line, forward speed and how it turns around
 """
@@ -32,6 +35,7 @@ import pandas as pd
 
 FPS = 25
 GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches", "shape")
+MODEL_GROUPS = tuple(g for g in GROUPS if g != "touches")      # what the classifier uses by default
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running

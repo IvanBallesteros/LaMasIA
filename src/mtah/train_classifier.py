@@ -39,7 +39,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 for sub in ("src", "tools", "evaluation", "starter"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-from mtah.features import COLUMNS, GROUPS, frame_features  # noqa: E402
+from mtah.features import COLUMNS, GROUPS, MODEL_GROUPS, frame_features  # noqa: E402
 
 CLASSES = np.array(["H", "A", "D"])
 FPS = 25
@@ -229,6 +229,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets"))
     parser.add_argument("--labels", nargs="+", choices=("harmonized", "raw"), default=["harmonized", "raw"])
+    parser.add_argument("--groups", nargs="+", default=list(MODEL_GROUPS), choices=GROUPS,
+                        help="feature groups of the full model (default: every group but touches)")
     parser.add_argument("--without", nargs="*", default=["gap"], choices=GROUPS,
                         help="besides the model with every group, one model without each of these")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
@@ -245,8 +247,9 @@ def main():
         splits = json.load(handle)
     t0 = time.time()
     items = [tuple(x) for split in CV_SPLITS + ("val_metrica",) for x in splits.get(split, [])]
-    data = {x: load(args.datasets, *x) for x in items}
-    variants = [GROUPS] + [tuple(g for g in GROUPS if g != w) for w in args.without]
+    groups = tuple(g for g in GROUPS if g in args.groups)          # always in GROUPS order
+    data = {x: load(args.datasets, *x, groups=groups) for x in items}
+    variants = [groups] + [tuple(g for g in groups if g != w) for w in args.without if w in groups]
     print("%d matches x seeds loaded (%.0f s)" % (len(items), time.time() - t0))
     log = []
     for labels in args.labels:
