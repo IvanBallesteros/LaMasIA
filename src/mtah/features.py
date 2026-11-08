@@ -28,14 +28,17 @@ Feature groups, any of which can be left out:
              possession than anywhere else (docs/DECISIONS.md, 2026-11-07)
     shape    each team's shape and movement, from the players alone, so it also speaks when the
              ball is missing: width, depth, defensive line, forward speed and how it turns around
+    turn     where the ball was going along the pitch just before and just after this frame, and how
+             much it turned around: a team that wins the ball plays it the other way. Signed towards
+             the away goal, so + points to the home team. Not in MODEL_GROUPS until it is tested
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches", "shape")
-MODEL_GROUPS = tuple(g for g in GROUPS if g != "touches")      # what the classifier uses by default
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches", "shape", "turn")
+MODEL_GROUPS = tuple(g for g in GROUPS if g not in ("touches", "turn"))   # what the classifier uses by default
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
@@ -50,6 +53,7 @@ TOUCH_M = 2.5                # how close a player has to be
 TOUCH_WINDOW_S = 2.0
 SHAPE_SPEED_K = 12           # frames on each side to measure a player's forward speed
 SHAPE_TURN_S = 2.0           # seconds on each side to see a team turn around
+TURN_S = (0.5, 2.0)          # seconds on each side to see the ball turn around
 COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
@@ -66,6 +70,7 @@ COLUMNS = {
                 "tch_home_past", "tch_away_past", "tch_home_next", "tch_away_next"],
     "shape": ["shape_%s_%s" % (c, team) for c in ("width", "depth", "line", "forward", "turn") for team in ("home", "away")]
              + ["shape_gap"],
+    "turn": [c % s for s in TURN_S for c in ("ball_dir_past_%gs", "ball_dir_next_%gs", "ball_dir_jump_%gs")],
 }
 
 
@@ -315,6 +320,18 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         adv_away[FPS:-FPS] = -(cx_away[2 * FPS:] - cx_away[:-2 * FPS]) / 2.0 * attack[FPS:-FPS]
         cols["advance_home"], cols["advance_away"] = adv_home, adv_away
         cols["speed_all_2s"], _ = _window_mean(cols["speed_all"].astype(np.float32), 2 * FPS)
+
+    if "turn" in groups:
+        bx = np.where(attack != 0, (ball[:, 0] - L / 2) * attack, np.nan)          # metres towards the away goal
+        for s in TURN_S:
+            k = int(round(s * FPS))
+            past = np.full(n, np.nan, dtype=np.float32)
+            following = np.full(n, np.nan, dtype=np.float32)
+            past[k:] = (bx[k:] - bx[:-k]) / (k / FPS)
+            following[:-k] = (bx[k:] - bx[:-k]) / (k / FPS)
+            cols["ball_dir_past_%gs" % s] = past
+            cols["ball_dir_next_%gs" % s] = following
+            cols["ball_dir_jump_%gs" % s] = following - past
 
     if "shape" in groups:
         for name, side, sign in (("home", home, attack), ("away", away, -attack)):

@@ -3,6 +3,42 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
+## 2026-11-08 · Clasificador: ni pesos en los cambios ni grupo `turn`; se cierra el modelo (Martina)
+
+**Qué.**
+- El modelo del clasificador queda como está: `MODEL_GROUPS` (todos los grupos menos `touches` y
+  `turn`), parámetros por defecto, sin pesos. Candidato principal: entrenado con etiquetas
+  originales y decodificador ajustado en IDSSE (spellF1 0,621 / 0,512 / 0,615 en IDSSE
+  armonizadas / IDSSE originales / val_metrica).
+- `train_classifier.py --change-weight W` y el grupo `turn` (con `tests/test_ball_turn.py`) se
+  quedan en el código, sin usar.
+- Se pasa a preparar la entrega.
+
+**Por qué.**
+- **Dónde fallamos** (datasets v2.1, IDSSE armonizadas, IoU 0,5): las posesiones de menos de 5 s
+  son el 45 % de todas y solo se acierta el 6 % (< 2 s) y el 44 % (2–5 s); el 64 % de las de < 2 s
+  no se predicen. En el 50 % de las posesiones perdidas el clasificador ya da el equipo
+  equivocado; solo en el 9 % el clasificador acierta y el decodificador lo borra.
+- **Pesos** (frames a ≤ 1 s de un cambio directo H/A pesan 3 o 10): de −0,02 a +0,01 de spellF1
+  frente a sin peso. El decodificador sube su coste de cambio y las posesiones predichas apenas
+  cambian (225–254 frente a 315 reales en IDSSE).
+- **Grupo `turn`** (hacia dónde iba el balón a lo largo del campo antes y después, 0,5 y 2 s; en
+  train separaba los cambios con AUC 0,61 y acertaba el equipo el 73 % de las veces). Bootstrap
+  pareado frente al modelo sin él, con decodificador ajustado en IDSSE:
+
+  | entrenado con | IDSSE armonizadas | IDSSE originales | val_metrica |
+  |---|---|---|---|
+  | armonizadas | −0,002 [−0,009, +0,005] | +0,003 [−0,003, +0,009] | +0,011 [0,000, +0,023] |
+  | originales | +0,003 [−0,006, +0,011] | +0,006 [−0,002, +0,014] | +0,012 [−0,005, +0,029] |
+
+  Lo de val_metrica viene de METRICA1 (+0,022); METRICA2 no cambia. Por debajo del ruido.
+- Tres intentos seguidos (toques, pesos, `turn`) sin superar el ruido apuntan a que, con este
+  tracking, no hay más información fácil para las posesiones cortas. Cada idea más probada con
+  los mismos 8 partidos aumenta el riesgo de quedarse con una que gana por suerte.
+
+**Con qué datos.** Solo datasets v2.1: train para medir las señales, validación cruzada en IDSSE y
+val_metrica para los modelos. Nada del partido del reto. Los test siguen sin mirarse.
+
 ## 2026-11-07 · Clasificador: fuera el grupo `touches` (Martina)
 
 **Qué.**
