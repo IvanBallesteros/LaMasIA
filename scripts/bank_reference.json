@@ -1,0 +1,76 @@
+{
+  "model": "cv_gbm_raw_ball-near-context-players-gap-tags-memory-edges-shape",
+  "datasets": "datasets_v2_1",
+  "params": {
+    "switch": 32,
+    "to_dead": 64,
+    "from_dead": 32,
+    "from_dead_tag": 0,
+    "tag_margin_s": 2
+  },
+  "note": "Same numbers as --predict prints, on the out-of-fold predictions of the IDSSE train + val matches and on the val_metrica ensemble. Public data only.",
+  "idsse": {
+    "decoded": {
+      "share_H": 0.2728875444694789,
+      "share_A": 0.27111228283916433,
+      "share_D": 0.4560001726913568,
+      "possessions_per_half": 123.625,
+      "possessions_per_45min": 117.0770080259122,
+      "p10_s": 2.8350000000000004,
+      "p50_s": 8.225,
+      "p90_s": 27.763333333333335
+    },
+    "truth_harmonized": {
+      "share_H": 0.28089655028486077,
+      "share_A": 0.2652923467529215,
+      "share_D": 0.45381110296221766,
+      "possessions_per_half": 157.33333333333334,
+      "possessions_per_45min": 148.9843097379839,
+      "p10_s": 1.292,
+      "p50_s": 5.87,
+      "p90_s": 24.77400000000001
+    },
+    "truth_raw": {
+      "share_H": 0.28098639424482685,
+      "share_A": 0.2652025027929555,
+      "share_D": 0.45381110296221766,
+      "possessions_per_half": 224.25,
+      "possessions_per_45min": 212.15541527679855,
+      "p10_s": 0.8666666666666667,
+      "p50_s": 3.6966666666666668,
+      "p90_s": 17.560666666666666
+    }
+  },
+  "val_metrica": {
+    "decoded": {
+      "share_H": 0.294227774548557,
+      "share_A": 0.27622883153284733,
+      "share_D": 0.42954339391859575,
+      "possessions_per_half": 109.5,
+      "possessions_per_45min": 103.35335331242024,
+      "p10_s": 3.1,
+      "p50_s": 10.95,
+      "p90_s": 33.510000000000005
+    },
+    "truth_harmonized": {
+      "share_H": 0.29252149380417086,
+      "share_A": 0.2735722809875613,
+      "share_D": 0.4339062252082678,
+      "possessions_per_half": 167.25,
+      "possessions_per_45min": 157.73414333349854,
+      "p10_s": 1.2,
+      "p50_s": 5.42,
+      "p90_s": 23.412000000000003
+    },
+    "truth_raw": {
+      "share_H": 0.2924789876407772,
+      "share_A": 0.2735439435452989,
+      "share_D": 0.43397706881392395,
+      "possessions_per_half": 167.25,
+      "possessions_per_45min": 157.73414333349854,
+      "p10_s": 1.2,
+      "p50_s": 5.42,
+      "p90_s": 23.412000000000003
+    }
+  }
+}

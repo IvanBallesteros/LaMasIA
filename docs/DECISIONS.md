@@ -3,6 +3,59 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
+## 2026-11-08 · Entrega: `scripts/make_submission.py` (paquete B)
+
+**Qué.** Un solo comando regenera la entrega: `--train` y luego `--predict`.
+- **Candidato** (cerrado el 8 de noviembre, sin tocar): `MODEL_GROUPS`, parámetros por defecto,
+  etiquetas originales y el decodificador ajustado en IDSSE (switch 32, to_dead 64, from_dead 32,
+  from_dead_tag 0, tag_margin_s 2).
+- **`--train`** entrena con IDSSE train + val y todas sus semillas, es decir, la unión de los folds
+  de la validación cruzada y con el mismo muestreo. Guarda el modelo y un manifiesto (commit, datos,
+  grupos, etiquetas, versiones, hashes) en `external/models/<nombre>/`.
+- **`--predict`** lee el partido con los lectores que comprueba `tests/test_challenge_roundtrip.py`,
+  calcula `frame_features()`, predice, decodifica y escribe `frame,label` para los 199.319 frames.
+  Pasa `evaluation/validate_submission.py` e imprime solo agregados, junto a los mismos números en
+  los bancos.
+- **En el repo**: `scripts/decoder_idsse.json` (los costes) y `scripts/bank_reference.json` (los
+  agregados de referencia).
+
+**Decisiones dentro del comando.**
+- **Partes.** Se decodifica de 11185 a 90651 y de 113742 a 190197. De 110808 a 113741 se escribe D
+  sin decodificar; fuera de las partes, X.
+- **Equipos.** Por orden del XML, como documenta el reto. En Smart Tagging se aceptan `Barcelona`,
+  `Atletic Club` y `N/A`; cualquier otra etiqueta para el comando. Además, una comprobación sin
+  etiquetas: en las ventanas H debe haber más jugadores locales cerca del balón que en las A. En los
+  12 partidos del banco la diferencia es de +0,05 a +0,32. Si no se cumple avisa, pero no para.
+- **Un solo hilo OpenMP.** El boosting suma gradientes en paralelo, y el número de hilos puede
+  cambiar los últimos decimales del modelo entre ordenadores.
+- **El CSV se escribe junto a los datos** (`<data-dir>/submission/`), así el de partido real nunca
+  cae dentro del repo.
+- **`--debug` es solo para datos falsos**: sin él, un error no imprime su texto.
+
+**Comprobación, sin datos reales** (`python tests/test_make_submission.py`).
+- **Partido falso de principio a fin**: 199.319 filas, X fuera de las partes, D de 110808 a 113741.
+- **Determinismo**: dos ejecuciones dan el mismo CSV byte a byte (sha256), y dos entrenamientos, el
+  mismo fichero de modelo.
+- **Equivalencia** en J03WOY y J03WMX, exportados y pasados por el comando como si fueran el reto:
+  con 10 decimales, probabilidades, etiquetas y puntuaciones **idénticas** a las del camino
+  `load_match`. Con los 6 decimales por defecto (0,05 mm) cambian 20 y 45 etiquetas de ~145.000 y
+  el spellF1 se mueve ≤ 0,001.
+- **Los costes** se regeneraron aquí desde cero, porque la carpeta de Martina no está en este
+  ordenador, y coinciden con su registro: mismos costes, spellF1 / macroF1 0,621 / 0,896 en IDSSE
+  y 0,615 / 0,903 en val_metrica, 247 y 219 posesiones.
+
+**Con qué datos.** IDSSE y Metrica para entrenar y validar; `fake_data` para probar. Nada del partido
+del reto: ningún ajuste lo usa y `--check-public-5min` solo comprueba la alineación.
+
+**Abierto.**
+- El determinismo está comprobado en un ordenador. Falta que otra persona ejecute `--train` y
+  compare los dos sha256 que imprime.
+- Esta rama no incluye el último commit de `main` (v2.1 por defecto); fusionarlos dará conflictos
+  en `train_classifier.py`, `DECISIONS.md` y `log.csv`. El comando pasa la carpeta de datos
+  explícitamente y no depende de eso.
+- El modelo sigue prediciendo menos posesiones de las que hay (247 frente a 315 en IDSSE, 219
+  frente a 334 en Metrica).
+
 ## 2026-11-07 · Clasificador: fuera el grupo `touches` (Martina)
 
 **Qué.**
