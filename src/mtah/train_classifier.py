@@ -150,6 +150,22 @@ def by_match(rows, keys=("spell_f1", "macro_f1", "accuracy", "log_loss", "posses
     return mean_of([mean_of([r for r in rows if r["match"] == m], keys) for m in matches], keys)
 
 
+def change_weights(labels, weight, window_s):
+    """Sample weight per frame: `weight` within window_s of a direct change between H and A (the
+    short possessions the model misses are mostly made of such frames), 1 elsewhere."""
+    w = np.ones(len(labels), dtype=np.float64)
+    if weight == 1:
+        return w
+    k = int(round(window_s * FPS))
+    team = np.isin(labels, ("H", "A"))
+    change = np.flatnonzero(team[1:] & team[:-1] & (labels[1:] != labels[:-1])) + 1
+    mark = np.zeros(len(labels) + 1, dtype=np.int64)
+    np.add.at(mark, np.maximum(change - k, 0), 1)
+    np.add.at(mark, np.minimum(change + k, len(labels)), -1)
+    w[np.cumsum(mark)[:-1] > 0] = weight
+    return w
+
+
 def run(name, labels, groups, data, splits, args):
     from sklearn.ensemble import HistGradientBoostingClassifier
     import pandas as pd
@@ -164,7 +180,7 @@ def run(name, labels, groups, data, splits, args):
     oof_rows, metrica_rows, ensemble = [], [], {}
     t0 = time.time()
     for held in matches:
-        xs, ys = [], []
+        xs, ys, ws = [], [], []
         for match in matches:
             if match == held:
                 continue
@@ -174,10 +190,11 @@ def run(name, labels, groups, data, splits, args):
                 keep = np.flatnonzero(d["graded"] & np.isin(d["labels"][labels], CLASSES))[::args.step * len(seeds)]
                 xs.append(d["features"].iloc[keep][cols])
                 ys.append(d["labels"][labels][keep])
+                ws.append(change_weights(d["labels"][labels], args.change_weight, args.change_window_s)[keep])
         model = HistGradientBoostingClassifier(random_state=0, early_stopping=False, learning_rate=args.learning_rate,
                                                max_iter=args.max_iter, max_leaf_nodes=args.max_leaf_nodes,
                                                min_samples_leaf=args.min_samples_leaf)
-        model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys))
+        model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys), sample_weight=np.concatenate(ws))
         order = [list(model.classes_).index(c) for c in CLASSES]
         for (match, seed) in [x for x in pool if x[0] == held] + metrica:
             d = data[match, seed]
@@ -216,7 +233,8 @@ def run(name, labels, groups, data, splits, args):
         summary["val_metrica_rounds_sd"]["spell_f1"], summary["val_metrica_rounds_sd"]["macro_f1"]))
     with open(os.path.join(out, "summary.json"), "w") as handle:
         json.dump({"name": name, "labels": labels, "groups": groups, "step": args.step, "cv_matches": matches,
-                   "model": {k: getattr(args, k) for k in ("learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf")},
+                   "model": {k: getattr(args, k) for k in ("learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf",
+                                                            "change_weight", "change_window_s")},
                    "oof": oof_rows, "val_metrica": metrica_rows, "val_metrica_ensemble": ens_rows, "summary": summary},
                   handle, indent=2)
     print("  predictions in %s  (%.0f s)" % (out, time.time() - t0))
@@ -238,6 +256,9 @@ def main():
     parser.add_argument("--max-iter", type=int, default=100)
     parser.add_argument("--max-leaf-nodes", type=int, default=31)
     parser.add_argument("--min-samples-leaf", type=int, default=20)
+    parser.add_argument("--change-weight", type=float, default=1.0,
+                        help="training weight of the frames near a direct H/A change (1: no weighting)")
+    parser.add_argument("--change-window-s", type=float, default=1.0, help="seconds on each side of the change")
     parser.add_argument("--tag", default="", help="added to the run's name, for runs with other hyperparameters")
     parser.add_argument("--out", default=os.path.join(ROOT, "external", "predictions"))
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
