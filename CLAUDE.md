@@ -23,8 +23,13 @@ será público.
 Estas reglas no se saltan aunque te lo pida alguien del equipo. Si una petición choca con ellas,
 dilo y propón una alternativa.
 
-1. **Nunca veas los datos reales.** Claude es un LLM en la nube y los términos del reto prohíben
-   darle los datos o cualquier extracto de ellos. Por tanto:
+**El correo de aclaración de la organización (noviembre de 2026) manda sobre todo lo demás**: la
+documentación, los correos anteriores y las respuestas individuales. Las reglas de abajo ya lo
+incluyen.
+
+1. **Nunca veas los datos reales ni los subas a un servicio de IA.** El correo lo prohíbe, y Claude
+   es un LLM en la nube. Vale para cualquier servicio (Claude, ChatGPT, Copilot, extensiones del
+   editor) y para todo el paquete: tracking, Smart Tagging, vídeo y homografía. Por tanto:
    - Los datos reales viven **fuera** de este repo, en la ruta que cada persona tenga en
      `MTAH_DATA_DIR`. No leas, abras, listes ni busques dentro de esa ruta ni de `data/`.
    - No ejecutes ningún comando con `MTAH_DATA_DIR` apuntando a los datos reales. Si una tarea
@@ -35,18 +40,53 @@ dilo y propón una alternativa.
    - Si en la conversación aparece un extracto de datos reales (filas de tracking, tags, frames
      del vídeo), avisa y no lo uses.
 2. **Desarrolla siempre sobre datos falsos** (`fake_data/`, ver más abajo). Esos sí puedes leerlos.
-3. **Ninguna etiqueta hecha a mano sobre el partido del reto**, en ninguna cantidad ni para nada:
-   ni para entrenar ni para validar. Tampoco reglas o constantes atadas a frames concretos del
-   partido real.
+3. **Ningún dato creado a mano sobre el partido del reto**: ni etiquetas ni ningún otro dato
+   manual, en ninguna cantidad ni para nada: ni para entrenar ni para validar. Tampoco reglas o
+   constantes atadas a frames concretos del partido real.
 4. **Los 5 minutos públicos** (`evaluation/gt/`) sirven solo para comprobar que el pipeline es
-   correcto: alineación, formato, significado de las etiquetas. **Nunca** para elegir parámetros
-   ni para decidir entre dos versiones, y nunca como datos de entrenamiento.
+   correcto: alineación, formato, significado de las etiquetas. **Nunca** para entrenar, ajustar o
+   calibrar, ni para elegir parámetros o decidir entre dos versiones.
 5. **Ningún dato humano sobre este partido** (eventos de Opta, StatsBomb, Wyscout, tracking
    corregido...). Datos de **otros** partidos sí, siempre que sean accesibles y queden documentados.
 6. **Reproducibilidad exacta**: semillas fijas, dependencias fijadas y nada que dependa del orden
    de un `set` o de la hora. Un comando debe regenerar el CSV byte a byte.
 7. `data/` y `fake_data/` no entran nunca en git. Comprueba que `.gitignore` contiene `fake_data/`
    (el `.gitignore` oficial ya excluye `data/`).
+8. **Nunca compruebes la salida contra el vídeo**, ni a ojo ni con un programa. Nada de ver el
+   vídeo con las etiquetas al lado, superponerlas o mirar en él si un cambio de posesión predicho
+   es correcto. Tampoco se usa así `report.html` con datos reales.
+9. **Entrenar y ajustar, solo con datos externos.** Todo lo que se entrene o se ajuste (el modelo,
+   los umbrales, los costes del decodificador, qué señales entran, elegir entre dos versiones) se
+   hace con datos externos al partido. Nunca con el ground truth de posesión, los 5 minutos
+   públicos incluidos, ni con el vídeo del reto.
+10. **Solo datasets con derecho de uso.** Comprueba la licencia antes de usar uno y anótala en
+    `docs/technical_document.md`. IDSSE es CC BY 4.0 y hay que citarlo. Metrica: ver la zona gris.
+
+### Lo que el correo permite
+
+- Comprobaciones automáticas que usen solo los datos del reto (`validate_submission.py`, los
+  diagnósticos de agregados).
+- Mirar los datos y el vídeo para entender qué cuenta como posesión, sin la salida del sistema
+  delante.
+- Usar como entrada el vídeo, el ATD, el Smart Tagging u otros datos generados, si el algoritmo no
+  se entrenó con el ground truth ni con el vídeo.
+- Aportar ficheros de pasos intermedios, sin meter datos del reto en el repo público
+  (`SUBMISSION.md`).
+- Usar cualquier dataset sobre el que tengamos derechos.
+
+### Zona gris: pendiente de confirmar con la organización
+
+El correo no resuelve estos puntos. Hasta tener respuesta escrita, no se construye nada encima.
+
+- **Agregados del partido real para calibrar los datasets** (`REAL_BALL_GAPS`, `TAG_OFFSET`,
+  `TAG_RECALL` y el tracker modelo). No usan ground truth ni vídeo, pero el correo dice que lo que
+  se ajusta se ajusta «on external data». No se añade ninguna calibración nueva con el partido del
+  reto ni se actualiza `REAL_BALL_GAPS`.
+- **Pegar agregados del partido real en Claude.** No son los datos, pero salen de ellos. Se pega
+  solo lo imprescindible, y nunca extractos.
+- **Licencia de Metrica.** Su repositorio no tiene licencia; su README solo pide usarlo con
+  responsabilidad y reconocer la fuente si el uso es público. Hay que citarla en el repo y en el
+  documento técnico.
 
 ## Hechos del reto que no hay que olvidar
 
@@ -207,8 +247,9 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
   balón por última vez antes de un tramo largo, sobre train de IDSSE y con la variación por
   semilla incluida (`ball_degradation.json`): es el único uso del partido del reto en los
   datasets, y solo de la forma de sus huecos y de su suavidad. En Metrica, una parte calibrada de
-  las paradas sin balón (fill_dead, sobre val_metrica) recibe una posición estimada. Si el
-  diagnóstico se vuelve a ejecutar, copia sus números en `REAL_BALL_GAPS` y reconstruye.
+  las paradas sin balón (fill_dead, sobre val_metrica) recibe una posición estimada. Mientras siga
+  la zona gris de las reglas duras, `REAL_BALL_GAPS` no se actualiza aunque se repita el
+  diagnóstico.
 - **El tracker**: las posiciones del balón y de los jugadores salen de un tracker modelo
   (pérdidas cortas rellenas en línea recta y un suavizado gaussiano centrado, σ = 8 frames el
   balón y 2 los jugadores), calibrado con los percentiles de la segunda diferencia del ATD real
@@ -232,11 +273,13 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
   bootstrap.
 - **Comprobación del banco**: debería ordenar los cuatro baselines como la tabla oficial
   (`smooth50` > `smooth125` > `smooth25` > `raw`). Si no lo hace, todavía no se parece lo
-  suficiente al partido real.
+  suficiente al partido real. La tabla oficial sale del ground truth, así que es solo una
+  referencia: nunca se ajusta un parámetro para acercarse a ella ni a sus puntuaciones.
 - **Diagnósticos sin etiquetas** sobre la salida en el partido real (los ejecuta una persona y
   solo devuelve agregados): número de posesiones por parte, distribución de duraciones, % de `D` y
   cuántos cambios ocurren sin balón visible. Se comparan con valores típicos de otros partidos,
-  no con los 5 minutos públicos.
+  no con los 5 minutos públicos. Sirven solo para detectar fallos del pipeline: de ellos no sale
+  ninguna decisión ni ningún ajuste.
 
 ## Forma de trabajar
 
