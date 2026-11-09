@@ -96,8 +96,9 @@ def write_atd_meta(path, meta, slot_team, home_left_first):
         handle.write(xml)
 
 
-def write_atd_raw(path, players, ball, pitch):
-    """players [n, slots, 2] and ball [n, 2] in metres -> the raw ATD text, normalised 0-1."""
+def write_atd_raw(path, players, ball, pitch, decimals=6):
+    """players [n, slots, 2] and ball [n, 2] in metres -> the raw ATD text, normalised 0-1, with
+    `decimals` digits: 6 are ~0.05 mm on the long side, 10 read back as the same float32 positions."""
     L, W = pitch
     scale = np.array([L, W])
     norm_p, norm_b = players / scale, ball / scale
@@ -107,7 +108,7 @@ def write_atd_raw(path, players, ball, pitch):
     def group(xy, s):
         if xy[0] != xy[0]:
             return empty
-        return "%.6f,%.6f,%s" % (xy[0], xy[1], "NaN" if s != s else "%.3f" % s)
+        return "%.*f,%.*f,%s" % (decimals, xy[0], decimals, xy[1], "NaN" if s != s else "%.3f" % s)
 
     buffer = []
     with open(path, "w", newline="\n") as handle:
@@ -122,7 +123,7 @@ def write_atd_raw(path, players, ball, pitch):
         handle.writelines(buffer)
 
 
-def export(datasets, match, seed, out):
+def export(datasets, match, seed, out, decimals=6):
     """Write the match in challenge format under `out`; returns games.asset_paths for it."""
     m = load_match(datasets, match, seed)
     meta = m["meta"]
@@ -132,7 +133,7 @@ def export(datasets, match, seed, out):
     with np.errstate(invalid="ignore"):
         home_x = np.nanmean(m["players"][a:b + 1][:, m["slot_team"] == 0, 0])
     write_atd_meta(paths["atd_meta"], meta, m["slot_team"], home_x < meta["pitch_m"][0] / 2)
-    write_atd_raw(paths["atd_raw"], m["players"], m["ball"], meta["pitch_m"])
+    write_atd_raw(paths["atd_raw"], m["players"], m["ball"], meta["pitch_m"], decimals)
     shutil.copyfile(m["smart_tagging"], paths["smart_tagging"])
     with open(os.path.join(out, "exported_from.json"), "w") as handle:
         json.dump({"datasets": os.path.abspath(datasets), "match": match, "seed": seed}, handle, indent=2)
@@ -145,8 +146,9 @@ def main():
     parser.add_argument("--match", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", required=True, help="folder that plays the role of the data bundle")
+    parser.add_argument("--decimals", type=int, default=6, help="digits of the 0-1 coordinates")
     args = parser.parse_args()
-    paths = export(args.datasets, args.match, args.seed, args.out)
+    paths = export(args.datasets, args.match, args.seed, args.out, args.decimals)
     print("\n".join("%-14s %s" % kv for kv in paths.items() if os.path.isfile(kv[1])))
 
 
