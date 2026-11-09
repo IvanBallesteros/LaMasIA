@@ -97,6 +97,10 @@ for sub in ("", "starter", "evaluation"):
 
 FPS = 25
 SLOTS_PER_TEAM = 23                    # 46 slots, as in the challenge ATD
+# The current datasets: what this script builds by default and what src/mtah/train_classifier.py and
+# src/mtah/decoder.py read by default. A new version changes these two lines (and check_datasets).
+DATASETS_VERSION = "2.1"
+DEFAULT_DATASETS = os.path.join(ROOT, "external", "datasets_v2_1")
 PAD_BEFORE_S, HALFTIME_S, PAD_AFTER_S = 20, 60, 10
 MISSING_CM = -32768
 MISSING_MM = -2 ** 31
@@ -1492,6 +1496,32 @@ def write_match(clean, out_dir, seeds, prm, harmonization, jitter=False):
     return meta, rows
 
 
+def check_datasets(path):
+    """Why `path` is not an up-to-date build of the current datasets (DATASETS_VERSION), as a list of
+    messages, empty if it is: nothing built there, positions in centimetres (v1, v2), or the Metrica
+    games from before the fill_dead fix (calibrated with fewer than FILL_DRAWS draws per game)."""
+    rebuild = "build them with: python tools/build_datasets.py --verify"
+    if not os.path.isfile(os.path.join(path, "splits.json")):
+        return ["no datasets in %s (%s)" % (path, rebuild)]
+    with open(os.path.join(path, "splits.json")) as handle:
+        match, seed = next(iter(json.load(handle).values()))[0]
+    with np.load(os.path.join(path, "matches", match, "seed%d" % seed, "tracking.npz")) as track:
+        if "ball_mm" not in track.files:
+            return ["positions in centimetres: a version older than v%s (%s)" % (DATASETS_VERSION, rebuild)]
+    problems = []
+    try:
+        with open(os.path.join(path, "ball_degradation.json")) as handle:
+            draws = json.load(handle)["metrica_fill"]["draws_per_match"]
+    except (OSError, KeyError, ValueError):
+        draws = None
+    if draws is None:
+        problems.append("no Metrica calibration in ball_degradation.json (%s)" % rebuild)
+    elif draws != FILL_DRAWS:
+        problems.append("Metrica games from before the fill_dead fix (redo them with: "
+                        "python tools/build_datasets.py --only-metrica --verify)")
+    return problems
+
+
 def matches_on_disk(out_dir, names):
     """(metas, rows) of matches already written in out_dir, as write_match returns them."""
     metas, rows = [], []
@@ -1949,7 +1979,7 @@ def main():
         split_of["FAKE0"] = "train"
         wanted = ["FAKE0"] + list(METRICA)
     else:
-        out_dir = os.path.abspath(args.out or os.path.join(ROOT, "external", "datasets_v2_1"))
+        out_dir = os.path.abspath(args.out or DEFAULT_DATASETS)
         wanted = list(METRICA) if args.only_metrica else args.matches or (list(IDSSE) + list(METRICA))
 
     for match in wanted:

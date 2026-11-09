@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Per-frame classifier, leave-one-match-out over the six IDSSE train + val matches.
 
-    python src/mtah/train_classifier.py --datasets external/datasets --log
+    python src/mtah/train_classifier.py --log                         # the current datasets (v2.1)
     python src/mtah/train_classifier.py --labels raw --without gap --log
+    python src/mtah/train_classifier.py --datasets external/datasets --log   # an older version, to compare
+
+--datasets defaults to the current datasets (tools/build_datasets.py DEFAULT_DATASETS), which must be
+built and up to date (tools/build_datasets.py check_datasets): otherwise it stops and says how to
+build them. Another folder is allowed, with a warning if it is not the current version. --out
+defaults to external/predictions<suffix of the datasets folder>: external/predictions_v2_1 for v2.1.
 
 A gradient-boosted tree model on src/mtah/features.py, predicting H / A / D per frame. Each round
 leaves one IDSSE match out (all its seeds together), trains on the other five and predicts the
@@ -90,6 +96,20 @@ def score_proba(gt_labels, proba, graded):
     y = (gt_labels[ok] == "A") * 1 + (gt_labels[ok] == "D") * 2                 # index in CLASSES
     s["log_loss"] = log_loss(y, proba[ok], labels=[0, 1, 2])
     return s
+
+
+def resolve_datasets(path):
+    """The --datasets folder: the current version when none is given, which has to be built and up to
+    date; another folder is taken as given, with a warning when it is not the current version."""
+    import build_datasets as bd
+    problems = bd.check_datasets(path or bd.DEFAULT_DATASETS)
+    if path is None:
+        if problems:
+            raise SystemExit("the current datasets (v%s) are not ready:\n  %s" % (bd.DATASETS_VERSION, "\n  ".join(problems)))
+        return bd.DEFAULT_DATASETS
+    if problems:
+        print("WARNING: %s is not the current datasets (v%s):\n  %s" % (path, bd.DATASETS_VERSION, "\n  ".join(problems)))
+    return path
 
 
 def smooth50(datasets, match, seed, cache_dir):
@@ -232,7 +252,8 @@ def run(name, labels, groups, data, splits, args):
     print("  val_metrica spread over rounds (sd): spellF1 %.4f   macroF1 %.4f" % (
         summary["val_metrica_rounds_sd"]["spell_f1"], summary["val_metrica_rounds_sd"]["macro_f1"]))
     with open(os.path.join(out, "summary.json"), "w") as handle:
-        json.dump({"name": name, "labels": labels, "groups": groups, "step": args.step, "cv_matches": matches,
+        json.dump({"name": name, "datasets": os.path.basename(os.path.normpath(args.datasets)),
+                   "labels": labels, "groups": groups, "step": args.step, "cv_matches": matches,
                    "model": {k: getattr(args, k) for k in ("learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf",
                                                             "change_weight", "change_window_s")},
                    "oof": oof_rows, "val_metrica": metrica_rows, "val_metrica_ensemble": ens_rows, "summary": summary},
@@ -245,10 +266,11 @@ def run(name, labels, groups, data, splits, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets"))
+    parser.add_argument("--datasets", default=None,
+                        help="dataset folder (default: the current version, external/datasets_v2_1)")
     parser.add_argument("--labels", nargs="+", choices=("harmonized", "raw"), default=["harmonized", "raw"])
     parser.add_argument("--groups", nargs="+", default=list(MODEL_GROUPS), choices=GROUPS,
-                        help="feature groups of the full model (default: every group but touches)")
+                        help="feature groups of the full model (default: MODEL_GROUPS, every group but touches and turn)")
     parser.add_argument("--without", nargs="*", default=["gap"], choices=GROUPS,
                         help="besides the model with every group, one model without each of these")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
@@ -260,9 +282,14 @@ def main():
                         help="training weight of the frames near a direct H/A change (1: no weighting)")
     parser.add_argument("--change-window-s", type=float, default=1.0, help="seconds on each side of the change")
     parser.add_argument("--tag", default="", help="added to the run's name, for runs with other hyperparameters")
-    parser.add_argument("--out", default=os.path.join(ROOT, "external", "predictions"))
+    parser.add_argument("--out", default=None,
+                        help="default: external/predictions + the suffix of the datasets folder (predictions_v2_1)")
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
     args = parser.parse_args()
+    args.datasets = resolve_datasets(args.datasets)
+    args.out = args.out or os.path.join(
+        ROOT, "external", os.path.basename(os.path.normpath(args.datasets)).replace("datasets", "predictions", 1))
+    print("datasets %s -> predictions %s" % (args.datasets, args.out))
 
     with open(os.path.join(args.datasets, "splits.json")) as handle:
         splits = json.load(handle)

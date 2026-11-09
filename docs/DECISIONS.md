@@ -77,6 +77,27 @@ IDSSE y val_metrica para el modelo). Nada del partido del reto.
 - Los cambios de posesión siguen siendo el punto débil: el modelo predice ~247 posesiones frente a
   315 en IDSSE y ~215 frente a 334 en Metrica. Un detector de toques tendría que mirar otra cosa
   (por ejemplo, el cambio de dirección en una ventana más larga, o quién se acerca al balón).
+## 2026-11-06 · v2.1, los datos por defecto de los experimentos
+
+**Qué.**
+- `src/mtah/train_classifier.py` y `src/mtah/decoder.py` leen `external/datasets_v2_1` si no se
+  pasa `--datasets`.
+- Si la carpeta no está construida o está desfasada, se paran con el comando que lo arregla. Una
+  carpeta desfasada es la que tiene posiciones en cm (v1, v2) o el Metrica de antes de la
+  corrección de `fill_dead`. La comprobación es `check_datasets` en `tools/build_datasets.py`.
+- Las predicciones van por defecto a `external/predictions_v2_1`.
+- `summary.json` apunta la carpeta de datos, y el decodificador la usa y no deja mezclar versiones.
+- Otra versión se puede pasar con `--datasets`, con un aviso, para comparar.
+- La versión actual vive en `DATASETS_VERSION` y `DEFAULT_DATASETS` de `tools/build_datasets.py`.
+- Etiquetas git: `v2.1-datasets` (el merge de la rama en `main`) y `v2-datasets` (commit 34dff27,
+  que solo existe en la rama `feature/datasets-v2`).
+
+**Por qué.** Que nadie entrene o ajuste costes sin querer con v1, cuyo ruido es 60–250 veces el
+del ATD real, ni con un Metrica desfasado.
+
+**Referencia en v2.1** (2026-11-05, `experiments/log.csv`): con el decodificador, el mejor modelo
+(etiquetas originales) da spellF1 / macroF1 de 0,56 / 0,875 en IDSSE y 0,58 / 0,88 en val_metrica.
+smooth50 da 0,240 / 0,626 y 0,263 / 0,639.
 
 ## 2026-11-05 · Datasets v2.1: corrección de Metrica (`fill_dead` = 0,9) e IDSSE congelado (paquete A)
 
