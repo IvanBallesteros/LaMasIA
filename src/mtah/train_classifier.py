@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Per-frame classifier, leave-one-match-out over the six IDSSE train + val matches.
 
-    python src/mtah/train_classifier.py --log                         # the current datasets (v2.1)
-    python src/mtah/train_classifier.py --labels raw --without gap --log
+    python src/mtah/train_classifier.py --log                         # the candidate, on the current datasets (v2.1)
+    python src/mtah/train_classifier.py --labels harmonized raw --without gap --log   # both labels, and a model without gap
     python src/mtah/train_classifier.py --datasets external/datasets --log   # an older version, to compare
 
---datasets defaults to the current datasets (tools/build_datasets.py DEFAULT_DATASETS), which must be
+With no options it trains the submission's candidate: the original labels and every group in
+MODEL_GROUPS (gap included). Anything else has to be asked for. --datasets defaults to the current datasets (tools/build_datasets.py DEFAULT_DATASETS), which must be
 built and up to date (tools/build_datasets.py check_datasets): otherwise it stops and says how to
 build them. Another folder is allowed, with a warning if it is not the current version. --out
 defaults to external/predictions<suffix of the datasets folder>: external/predictions_v2_1 for v2.1.
@@ -268,11 +269,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--datasets", default=None,
                         help="dataset folder (default: the current version, external/datasets_v2_1)")
-    parser.add_argument("--labels", nargs="+", choices=("harmonized", "raw"), default=["harmonized", "raw"])
+    parser.add_argument("--labels", nargs="+", choices=("harmonized", "raw"), default=["raw"],
+                        help="labels to train on (default: raw, the candidate)")
     parser.add_argument("--groups", nargs="+", default=list(MODEL_GROUPS), choices=GROUPS,
                         help="feature groups of the full model (default: MODEL_GROUPS, every group but touches and turn)")
-    parser.add_argument("--without", nargs="*", default=["gap"], choices=GROUPS,
-                        help="besides the model with every group, one model without each of these")
+    parser.add_argument("--without", nargs="*", default=[], choices=GROUPS,
+                        help="besides the model with every group, one model without each of these (default: none)")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
     parser.add_argument("--learning-rate", type=float, default=0.1)
     parser.add_argument("--max-iter", type=int, default=100)

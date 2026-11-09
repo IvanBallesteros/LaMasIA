@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Temporal decoder: per-frame probabilities -> one H / A / D label per frame (HMM + Viterbi).
 
-    python src/mtah/decoder.py --pred external/predictions_v2_1/cv_gbm_raw_ball-near-context-players-tags --log
+    python src/mtah/decoder.py --log                                  # the candidate
+    python src/mtah/decoder.py --pred external/predictions_v2_1/cv_gbm_harmonized_ball-near-context-players-tags --fit-on both --log
 
---datasets defaults to the folder the predictions were made on (their summary.json), or else to
+With no options it decodes the submission's candidate: the predictions train_classifier.py writes
+with no options, and costs fitted on IDSSE against the harmonized labels. Anything else has to be
+asked for. --datasets defaults to the folder the predictions were made on (their summary.json), or else to
 the current datasets (tools/build_datasets.py DEFAULT_DATASETS), which must be built and up to
 date; predictions and datasets from different folders are refused.
 
@@ -17,11 +20,11 @@ pays a cost (in the same log units) every time it changes state:
                     restarts are cheaper where the tagging says there is one
 
 Viterbi finds the cheapest path over each half. The costs are fitted by coordinate descent on the
-official spellF1 (macroF1 breaks ties), averaging two benches that weigh the same: the IDSSE
-predictions made with each match left out (train_classifier.py, oof/) and val_metrica (the mean of
-the six rounds). --fit-on idsse / val_metrica fits on one bench only, so the other one scores the
-decoder out of sample; --target picks the IDSSE labels it is fitted against. The result is always
-scored on both label versions. test and test_metrica are never read.
+official spellF1 (macroF1 breaks ties) on the IDSSE predictions made with each match left out
+(train_classifier.py, oof/), so val_metrica (the mean of the six rounds) scores the decoder out of
+sample. --fit-on val_metrica fits on the other bench, and --fit-on both averages the two, which
+then weigh the same and leave no bench out of sample; --target picks the IDSSE labels it is fitted
+against. The result is always scored on both label versions. test and test_metrica are never read.
 
 PROVISIONAL: where the tracker loses the ball in the challenge match is not known yet
 (tools/ball_gap_diagnostic.py), and the synthetic SET PIECES windows sit +/-2-3 s around the
@@ -45,6 +48,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 for sub in ("src", "tools", "evaluation", "starter"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
+from mtah.features import MODEL_GROUPS  # noqa: E402
 from mtah.train_classifier import (FPS, append_log, by_match, mean_of, resolve_datasets, score,  # noqa: E402
                                    set_pieces, smooth50)
 
@@ -193,19 +197,30 @@ def decoder_file(pred_dir, fit_on, target):
     return os.path.join(pred_dir, "decoder_%s%s.json" % (fit_on, "_raw" if target == "raw" else ""))
 
 
+def candidate_predictions():
+    """Where train_classifier.py writes the candidate when it is run with no options."""
+    import build_datasets as bd
+    folder = os.path.basename(bd.DEFAULT_DATASETS).replace("datasets", "predictions", 1)
+    return os.path.join(ROOT, "external", folder, "cv_gbm_raw_" + "-".join(MODEL_GROUPS))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--pred", required=True, help="a train_classifier.py output folder (oof/ and val_metrica/)")
+    parser.add_argument("--pred", default=None, help="a train_classifier.py output folder (oof/ and val_metrica/); "
+                                                     "default: the candidate's")
     parser.add_argument("--datasets", default=None,
                         help="default: the folder the predictions were made on, else the current datasets (v2.1)")
     parser.add_argument("--block", type=int, default=5, help="frames per decoding step")
-    parser.add_argument("--fit-on", choices=("both", "idsse", "val_metrica"), default="both",
-                        help="the bench(es) the costs are fitted on")
+    parser.add_argument("--fit-on", choices=("both", "idsse", "val_metrica"), default="idsse",
+                        help="the bench(es) the costs are fitted on (default: idsse, the candidate)")
     parser.add_argument("--target", choices=VERSIONS, default="harmonized",
                         help="the IDSSE labels the costs are fitted against (Metrica: always its own)")
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
     args = parser.parse_args()
     fit_on = BENCHES if args.fit_on == "both" else (args.fit_on,)
+    args.pred = args.pred or candidate_predictions()
+    if not os.path.isfile(os.path.join(args.pred, "summary.json")):
+        raise SystemExit("no predictions in %s: run python src/mtah/train_classifier.py first" % args.pred)
 
     with open(os.path.join(args.pred, "summary.json")) as handle:
         summary = json.load(handle)

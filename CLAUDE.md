@@ -206,6 +206,11 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
   - Otra versión se puede pasar a mano, para comparar, y sale un aviso.
   - La versión actual está en un solo sitio: `DATASETS_VERSION` y `DEFAULT_DATASETS` en
     `tools/build_datasets.py`.
+- **El candidato por defecto**: `python src/mtah/train_classifier.py` y luego
+  `python src/mtah/decoder.py`, sin parámetros, reproducen el candidato de la entrega: etiquetas
+  originales, todos los grupos de `MODEL_GROUPS` (`gap` incluido) y costes ajustados en IDSSE contra
+  las etiquetas armonizadas. Explorar otra cosa hay que pedirlo: `--labels harmonized raw`,
+  `--without gap`, `--fit-on both`. Con `--fit-on both`, val_metrica deja de ser independiente.
 
 - **IDSSE**: 7 partidos de la Bundesliga y la 2. Bundesliga 2022/23 (Bassek et al., Scientific
   Data 2025, CC BY 4.0), con `BallStatus` y `BallPossession` en cada frame. Uso permitido por los
@@ -261,7 +266,8 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
   `load_match()` de `tools/build_datasets.py` (`labels="raw"` para las originales).
 - Con `--verify`, comprueba por fuente y con las dos versiones de etiquetas si los baselines
   oficiales se ordenan como en el partido real (smooth50 > smooth125 > smooth25 > raw).
-- **Comparaciones**: cada experimento se corre con las dos versiones de etiquetas y se compara
+- **Comparaciones**: cada experimento se corre con las dos versiones de etiquetas
+  (`--labels harmonized raw`, ya no es el valor por defecto) y se compara
   partido a partido con bootstrap pareado (`src/mtah/compare.py`). Diferencias de spellF1 por debajo
   de ~0,04 con dos partidos son ruido.
 
