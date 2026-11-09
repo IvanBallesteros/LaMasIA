@@ -24,8 +24,8 @@ argmax, with no temporal decoding, so spellF1 is expected to be low; every row a
 official baseline (smooth50) on the same frames and labels, as a measure of how hard they are.
 test and test_metrica are never read.
 
-It reads only external/ (public datasets). The hyperparameters are library defaults plus a fixed
-seed; nothing here is tuned on val_metrica or on the challenge match.
+It reads only external/ (public datasets). The hyperparameters default to the library's, plus a
+fixed seed; --tag names a run with other values. Nothing here is tuned on the challenge match.
 """
 
 import argparse
@@ -45,7 +45,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 for sub in ("src", "tools", "evaluation", "starter"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-from mtah.features import COLUMNS, GROUPS, frame_features  # noqa: E402
+from mtah.features import COLUMNS, GROUPS, MODEL_GROUPS, frame_features  # noqa: E402
 
 CLASSES = np.array(["H", "A", "D"])
 FPS = 25
@@ -170,6 +170,22 @@ def by_match(rows, keys=("spell_f1", "macro_f1", "accuracy", "log_loss", "posses
     return mean_of([mean_of([r for r in rows if r["match"] == m], keys) for m in matches], keys)
 
 
+def change_weights(labels, weight, window_s):
+    """Sample weight per frame: `weight` within window_s of a direct change between H and A (the
+    short possessions the model misses are mostly made of such frames), 1 elsewhere."""
+    w = np.ones(len(labels), dtype=np.float64)
+    if weight == 1:
+        return w
+    k = int(round(window_s * FPS))
+    team = np.isin(labels, ("H", "A"))
+    change = np.flatnonzero(team[1:] & team[:-1] & (labels[1:] != labels[:-1])) + 1
+    mark = np.zeros(len(labels) + 1, dtype=np.int64)
+    np.add.at(mark, np.maximum(change - k, 0), 1)
+    np.add.at(mark, np.minimum(change + k, len(labels)), -1)
+    w[np.cumsum(mark)[:-1] > 0] = weight
+    return w
+
+
 def run(name, labels, groups, data, splits, args):
     from sklearn.ensemble import HistGradientBoostingClassifier
     import pandas as pd
@@ -184,7 +200,7 @@ def run(name, labels, groups, data, splits, args):
     oof_rows, metrica_rows, ensemble = [], [], {}
     t0 = time.time()
     for held in matches:
-        xs, ys = [], []
+        xs, ys, ws = [], [], []
         for match in matches:
             if match == held:
                 continue
@@ -194,8 +210,11 @@ def run(name, labels, groups, data, splits, args):
                 keep = np.flatnonzero(d["graded"] & np.isin(d["labels"][labels], CLASSES))[::args.step * len(seeds)]
                 xs.append(d["features"].iloc[keep][cols])
                 ys.append(d["labels"][labels][keep])
-        model = HistGradientBoostingClassifier(random_state=0, early_stopping=False)
-        model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys))
+                ws.append(change_weights(d["labels"][labels], args.change_weight, args.change_window_s)[keep])
+        model = HistGradientBoostingClassifier(random_state=0, early_stopping=False, learning_rate=args.learning_rate,
+                                               max_iter=args.max_iter, max_leaf_nodes=args.max_leaf_nodes,
+                                               min_samples_leaf=args.min_samples_leaf)
+        model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys), sample_weight=np.concatenate(ws))
         order = [list(model.classes_).index(c) for c in CLASSES]
         for (match, seed) in [x for x in pool if x[0] == held] + metrica:
             d = data[match, seed]
@@ -235,6 +254,8 @@ def run(name, labels, groups, data, splits, args):
     with open(os.path.join(out, "summary.json"), "w") as handle:
         json.dump({"name": name, "datasets": os.path.basename(os.path.normpath(args.datasets)),
                    "labels": labels, "groups": groups, "step": args.step, "cv_matches": matches,
+                   "model": {k: getattr(args, k) for k in ("learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf",
+                                                            "change_weight", "change_window_s")},
                    "oof": oof_rows, "val_metrica": metrica_rows, "val_metrica_ensemble": ens_rows, "summary": summary},
                   handle, indent=2)
     print("  predictions in %s  (%.0f s)" % (out, time.time() - t0))
@@ -248,9 +269,19 @@ def main():
     parser.add_argument("--datasets", default=None,
                         help="dataset folder (default: the current version, external/datasets_v2_1)")
     parser.add_argument("--labels", nargs="+", choices=("harmonized", "raw"), default=["harmonized", "raw"])
+    parser.add_argument("--groups", nargs="+", default=list(MODEL_GROUPS), choices=GROUPS,
+                        help="feature groups of the full model (default: MODEL_GROUPS, every group but touches and turn)")
     parser.add_argument("--without", nargs="*", default=["gap"], choices=GROUPS,
                         help="besides the model with every group, one model without each of these")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
+    parser.add_argument("--learning-rate", type=float, default=0.1)
+    parser.add_argument("--max-iter", type=int, default=100)
+    parser.add_argument("--max-leaf-nodes", type=int, default=31)
+    parser.add_argument("--min-samples-leaf", type=int, default=20)
+    parser.add_argument("--change-weight", type=float, default=1.0,
+                        help="training weight of the frames near a direct H/A change (1: no weighting)")
+    parser.add_argument("--change-window-s", type=float, default=1.0, help="seconds on each side of the change")
+    parser.add_argument("--tag", default="", help="added to the run's name, for runs with other hyperparameters")
     parser.add_argument("--out", default=None,
                         help="default: external/predictions + the suffix of the datasets folder (predictions_v2_1)")
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
@@ -264,13 +295,14 @@ def main():
         splits = json.load(handle)
     t0 = time.time()
     items = [tuple(x) for split in CV_SPLITS + ("val_metrica",) for x in splits.get(split, [])]
-    data = {x: load(args.datasets, *x) for x in items}
-    variants = [GROUPS] + [tuple(g for g in GROUPS if g != w) for w in args.without]
+    groups = tuple(g for g in GROUPS if g in args.groups)          # always in GROUPS order
+    data = {x: load(args.datasets, *x, groups=groups) for x in items}
+    variants = [groups] + [tuple(g for g in groups if g != w) for w in args.without if w in groups]
     print("%d matches x seeds loaded (%.0f s)" % (len(items), time.time() - t0))
     log = []
     for labels in args.labels:
         for groups in variants:
-            name = "cv_gbm_%s_%s" % (labels, "-".join(groups))
+            name = "cv_gbm_%s_%s%s" % (labels, "-".join(groups), "_" + args.tag if args.tag else "")
             print("\n" + name)
             log += run(name, labels, groups, data, splits, args)
     if args.log:

@@ -17,19 +17,43 @@ Feature groups, any of which can be left out:
              datasets now copy the real ATD's pattern (tools/ball_gap_diagnostic.py), but only its
              aggregates; keep comparing against a model without this group.
     tags     Smart Tagging SET PIECES windows
+    memory   inside a gap: who was near the ball, and where it was, on each side of the gap. NaN
+             where the ball is seen. Depends on where the tracker loses the ball, like gap.
+    edges    who was near the ball just before and just after this frame, kept apart: a centred
+             window reads 0.5 right on a change of possession, these two read 1 and 0
+    touches  sharp changes of the ball's velocity next to a player: which team made the last and
+             the next one, how many in a row and how many in the last / next seconds. Not in the
+             model (MODEL_GROUPS): on a smoothed ball, as in the real ATD and datasets v2.1, a
+             touch is spread over ~0.6 s and the detector finds no more touches near a change of
+             possession than anywhere else (docs/DECISIONS.md, 2026-11-07)
+    shape    each team's shape and movement, from the players alone, so it also speaks when the
+             ball is missing: width, depth, defensive line, forward speed and how it turns around
+    turn     where the ball was going along the pitch just before and just after this frame, and how
+             much it turned around: a team that wins the ball plays it the other way. Signed towards
+             the away goal, so + points to the home team. Not in MODEL_GROUPS until it is tested
 """
 
 import numpy as np
 import pandas as pd
 
 FPS = 25
-GROUPS = ("ball", "near", "context", "players", "gap", "tags")
+GROUPS = ("ball", "near", "context", "players", "gap", "tags", "memory", "edges", "touches", "shape", "turn")
+MODEL_GROUPS = tuple(g for g in GROUPS if g not in ("touches", "turn"))   # what the classifier uses by default
 NEAR_M = 3.0                 # "near the ball" for player counts
 STILL_MS = 1.5               # a player slower than this is standing
 MAX_PLAYER_MS = 12.0         # faster is an identity switch, not running
 MAX_BALL_MS = 40.0           # the hardest shots stay below this
 CONTEXT_S = (0.5, 2.0, 5.0)  # half-widths of the centred windows
 TAG_HORIZON_S = 30.0
+GAP_EDGE_S = 1.0             # seconds of seen ball that describe each side of a gap
+GAP_EDGE_BALL = ("x_home_attack", "to_touchline", "to_goalline")
+TOUCH_K = 8                  # frames on each side to measure the ball's velocity: shorter is tracker noise
+TOUCH_MS = 6.0               # smallest change of velocity that counts as a touch
+TOUCH_M = 2.5                # how close a player has to be
+TOUCH_WINDOW_S = 2.0
+SHAPE_SPEED_K = 12           # frames on each side to measure a player's forward speed
+SHAPE_TURN_S = 2.0           # seconds on each side to see a team turn around
+TURN_S = (0.5, 2.0)          # seconds on each side to see the ball turn around
 COLUMNS = {
     "ball": ["ball_speed", "ball_x_home_attack", "ball_to_touchline", "ball_to_goalline", "ball_outside",
              "ball_speed_1s"],
@@ -39,6 +63,14 @@ COLUMNS = {
                 "territory_away", "advance_home", "advance_away", "speed_all_2s"],
     "gap": ["ball_seen", "gap_since_s", "gap_until_s", "gap_length_s"] + ["ball_seen_%gs" % s for s in CONTEXT_S],
     "tags": ["in_set_piece", "set_piece_team", "to_set_piece_s"],
+    "memory": ["mem_last_home", "mem_next_home", "mem_same", "mem_blend"]
+              + ["mem_%s_%s" % (side, c) for side in ("last", "next") for c in GAP_EDGE_BALL],
+    "edges": [c % s for s in CONTEXT_S for c in ("home_past_%gs", "home_next_%gs", "home_jump_%gs", "d_diff_jump_%gs")],
+    "touches": ["tch_last_home", "tch_last_s", "tch_last_run", "tch_next_home", "tch_next_s", "tch_next_run",
+                "tch_home_past", "tch_away_past", "tch_home_next", "tch_away_next"],
+    "shape": ["shape_%s_%s" % (c, team) for c in ("width", "depth", "line", "forward", "turn") for team in ("home", "away")]
+             + ["shape_gap"],
+    "turn": [c % s for s in TURN_S for c in ("ball_dir_past_%gs", "ball_dir_next_%gs", "ball_dir_jump_%gs")],
 }
 
 
@@ -60,6 +92,21 @@ def _window_mean(values, half):
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = np.where(count > 0, total / count, np.nan)
     return mean.astype(np.float32), (count / (hi - lo)).astype(np.float32)
+
+
+def _side_means(values, half):
+    """Means ignoring NaN over the `half` frames before and the `half` frames after each frame,
+    the frame itself left out."""
+    ok = ~np.isnan(values)
+    s = np.concatenate(([0.0], np.cumsum(np.where(ok, values, 0.0), dtype=np.float64)))
+    k = np.concatenate(([0.0], np.cumsum(ok, dtype=np.float64)))
+    i = np.arange(len(values))
+
+    def mean(lo, hi):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(k[hi] > k[lo], (s[hi] - s[lo]) / (k[hi] - k[lo]), np.nan).astype(np.float32)
+
+    return mean(np.maximum(i - half, 0), i), mean(i + 1, np.minimum(i + half + 1, len(values)))
 
 
 def _attack_sign(players, slot_team, halves, L):
@@ -87,6 +134,119 @@ def _gap_lengths(missing):
     return since.astype(np.float32), until.astype(np.float32), (since + until).astype(np.float32)
 
 
+def _gap_memory(nearest_home, ball, seen, attack, pitch, halves):
+    """The memory columns: for each frame without ball, what the seen ball said on each side of its
+    gap, within the same half. mem_last_home / mem_next_home are the share of the last / first
+    GAP_EDGE_S seconds with a home player nearest; mem_blend moves from one to the other as the gap
+    goes by, mem_same is 1 when they agree."""
+    L, W = pitch
+    n = len(seen)
+    half = int(GAP_EDGE_S * FPS) // 2
+    centred, _ = _window_mean(nearest_home, half)
+    before = np.full(n, np.nan, dtype=np.float32)
+    after = np.full(n, np.nan, dtype=np.float32)
+    before[2 * half:] = centred[half:n - half]       # frames i - 2 * half ... i
+    after[:n - 2 * half] = centred[half:n - half]    # frames i ... i + 2 * half
+    x, y = ball[:, 0], ball[:, 1]
+    at_edge = {"x_home_attack": (x - L / 2) * attack / (L / 2), "to_touchline": np.minimum(y, W - y),
+               "to_goalline": np.minimum(x, L - x)}
+    cols = {c: np.full(n, np.nan, dtype=np.float32) for c in COLUMNS["memory"]}
+    for a, b in halves:
+        idx = np.arange(a, b + 1)
+        in_half = seen[a:b + 1]
+        last = np.maximum.accumulate(np.where(in_half, idx, -1))
+        nxt = np.minimum.accumulate(np.where(in_half, idx, n)[::-1])[::-1]
+        for side, ref, values, known in (("last", last, before, last >= 0), ("next", nxt, after, nxt < n)):
+            ok = known & ~in_half
+            cols["mem_%s_home" % side][idx[ok]] = values[ref[ok]]
+            for c in GAP_EDGE_BALL:
+                cols["mem_%s_%s" % (side, c)][idx[ok]] = at_edge[c][ref[ok]]
+        ok = (last >= 0) & (nxt < n) & ~in_half
+        share = (idx[ok] - last[ok]) / (nxt[ok] - last[ok])
+        lo, hi = before[last[ok]], after[nxt[ok]]
+        cols["mem_blend"][idx[ok]] = lo * (1 - share) + hi * share
+        cols["mem_same"][idx[ok]] = 1 - np.abs(hi - lo)
+    return cols
+
+
+def _team_shape(players, side, sign, L):
+    """Shape columns of one team. sign: +1 where the team attacks towards x = L. x runs along the
+    team's attack from here on, so a low value is near its own goal."""
+    x = (players[:, side, 0] - L / 2) * sign[:, None]
+    y = players[:, side, 1]
+    k = SHAPE_SPEED_K
+    forward = np.full(x.shape, np.nan, dtype=np.float32)
+    forward[k:-k] = (x[2 * k:] - x[:-2 * k]) / (2 * k) * FPS
+    forward = np.where(np.abs(forward) > MAX_PLAYER_MS, np.nan, forward)
+    with np.errstate(invalid="ignore"), _quiet():
+        speed = np.nanmean(forward, axis=1).astype(np.float32)
+        out = {"width": np.nanstd(y, axis=1), "depth": np.nanstd(x, axis=1), "forward": speed}
+    out["line"] = np.sort(x, axis=1)[:, 1]            # the goalkeeper first, NaN last
+    past, following = _side_means(speed, int(SHAPE_TURN_S * FPS))
+    out["turn"] = following - past
+    return out
+
+
+def velocity_change(ball):
+    """How much the ball's velocity changes at each frame, in m/s (NaN where unknown)."""
+    k = TOUCH_K
+    before = np.full(ball.shape, np.nan, dtype=np.float32)
+    after = np.full(ball.shape, np.nan, dtype=np.float32)
+    before[k:] = (ball[k:] - ball[:-k]) / k * FPS
+    after[:-k] = (ball[k:] - ball[:-k]) / k * FPS
+    return np.linalg.norm(after - before, axis=1)
+
+
+def detect_touches(ball, d_home, d_away):
+    """Frames where the ball's velocity changes sharply next to a player, and whether that player
+    is a home one."""
+    k = TOUCH_K
+    change = np.nan_to_num(velocity_change(ball))
+    peak = change >= TOUCH_MS
+    for shift in range(1, k + 1):
+        peak[shift:] &= change[shift:] >= change[:-shift]
+        peak[:-shift] &= change[:-shift] > change[shift:]
+    with np.errstate(invalid="ignore"):
+        near = np.fmin(d_home, d_away) <= TOUCH_M
+        frames = np.flatnonzero(peak & near & ~np.isnan(d_home) & ~np.isnan(d_away))
+        return frames, d_home[frames] < d_away[frames]
+
+
+def _touch_columns(frames, home, n, halves):
+    """The touches columns, within each half. A run counts the touches of one team in a row."""
+    cols = {c: np.full(n, np.nan, dtype=np.float32) for c in COLUMNS["touches"]}
+    window = int(TOUCH_WINDOW_S * FPS)
+    for a, b in halves:
+        inside = (frames >= a) & (frames <= b)
+        f, h = frames[inside], home[inside]
+        if not len(f):
+            continue
+        back, ahead = np.ones(len(f)), np.ones(len(f))
+        for j in range(1, len(f)):
+            back[j] = back[j - 1] + 1 if h[j] == h[j - 1] else 1
+        for j in range(len(f) - 2, -1, -1):
+            ahead[j] = ahead[j + 1] + 1 if h[j] == h[j + 1] else 1
+        idx = np.arange(a, b + 1)
+        last = np.searchsorted(f, idx, side="right") - 1
+        nxt = last + 1
+        ok = last >= 0
+        cols["tch_last_home"][idx[ok]] = h[last[ok]]
+        cols["tch_last_s"][idx[ok]] = (idx[ok] - f[last[ok]]) / FPS
+        cols["tch_last_run"][idx[ok]] = back[last[ok]]
+        ok = nxt < len(f)
+        cols["tch_next_home"][idx[ok]] = h[nxt[ok]]
+        cols["tch_next_s"][idx[ok]] = (f[nxt[ok]] - idx[ok]) / FPS
+        cols["tch_next_run"][idx[ok]] = ahead[nxt[ok]]
+        count = np.concatenate(([0], np.cumsum(h)))
+        first = np.searchsorted(f, idx - window, side="right")
+        end = np.searchsorted(f, idx + window, side="right")
+        cols["tch_home_past"][idx] = count[last + 1] - count[first]
+        cols["tch_away_past"][idx] = (last + 1 - first) - cols["tch_home_past"][idx]
+        cols["tch_home_next"][idx] = count[end] - count[last + 1]
+        cols["tch_away_next"][idx] = (end - last - 1) - cols["tch_home_next"][idx]
+    return cols
+
+
 def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), groups=GROUPS):
     """DataFrame (one row per frame) of the requested feature groups.
 
@@ -111,7 +271,7 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         cols["ball_outside"] = np.maximum.reduce([-x, x - L, -y, y - W, np.zeros(n, dtype=np.float32)])
         cols["ball_speed_1s"], _ = _window_mean(cols["ball_speed"], FPS)
 
-    need_near = "near" in groups or "context" in groups
+    need_near = "near" in groups or "context" in groups or any(g in groups for g in ("memory", "edges", "touches"))
     if need_near:
         with np.errstate(invalid="ignore"):
             d = np.linalg.norm(players - ball[:, None, :], axis=2)
@@ -133,6 +293,14 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
             cols["nearest_home_%gs" % s], _ = _window_mean(nearest_home, int(s * FPS))
             cols["d_diff_%gs" % s], _ = _window_mean(d_home - d_away, int(s * FPS))
 
+    if "edges" in groups:
+        for s in CONTEXT_S:
+            past, following = _side_means(nearest_home, int(s * FPS))
+            cols["home_past_%gs" % s], cols["home_next_%gs" % s] = past, following
+            cols["home_jump_%gs" % s] = following - past
+            past, following = _side_means(d_home - d_away, int(s * FPS))
+            cols["d_diff_jump_%gs" % s] = following - past
+
     if "players" in groups:
         v = _speed(players)
         v = np.where(v > MAX_PLAYER_MS, np.nan, v)
@@ -152,6 +320,24 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
         adv_away[FPS:-FPS] = -(cx_away[2 * FPS:] - cx_away[:-2 * FPS]) / 2.0 * attack[FPS:-FPS]
         cols["advance_home"], cols["advance_away"] = adv_home, adv_away
         cols["speed_all_2s"], _ = _window_mean(cols["speed_all"].astype(np.float32), 2 * FPS)
+
+    if "turn" in groups:
+        bx = np.where(attack != 0, (ball[:, 0] - L / 2) * attack, np.nan)          # metres towards the away goal
+        for s in TURN_S:
+            k = int(round(s * FPS))
+            past = np.full(n, np.nan, dtype=np.float32)
+            following = np.full(n, np.nan, dtype=np.float32)
+            past[k:] = (bx[k:] - bx[:-k]) / (k / FPS)
+            following[:-k] = (bx[k:] - bx[:-k]) / (k / FPS)
+            cols["ball_dir_past_%gs" % s] = past
+            cols["ball_dir_next_%gs" % s] = following
+            cols["ball_dir_jump_%gs" % s] = following - past
+
+    if "shape" in groups:
+        for name, side, sign in (("home", home, attack), ("away", away, -attack)):
+            cols.update({"shape_%s_%s" % (k, name): v for k, v in _team_shape(players, side, sign, L).items()})
+        with np.errstate(invalid="ignore"), _quiet():
+            cols["shape_gap"] = (np.nanmean(players[:, home, 0], axis=1) - np.nanmean(players[:, away, 0], axis=1)) * attack
 
     if "gap" in groups:
         since, until, length = _gap_lengths(~seen)
@@ -174,6 +360,12 @@ def frame_features(players, slot_team, ball, pitch, halves, set_pieces=(), group
             dist = (np.arange(a, b) - lo) / FPS
             to_start[a:b] = np.where(np.abs(dist) < np.abs(to_start[a:b]), dist, to_start[a:b])
         cols["in_set_piece"], cols["set_piece_team"], cols["to_set_piece_s"] = inside, team, to_start
+
+    if "memory" in groups:
+        cols.update(_gap_memory(nearest_home, ball, seen, attack, pitch, halves))
+
+    if "touches" in groups:
+        cols.update(_touch_columns(*detect_touches(ball, d_home, d_away), n, halves))
 
     assert sorted(cols) == sorted(c for g in groups for c in COLUMNS[g])
     return pd.DataFrame({k: np.asarray(v, dtype=np.float32) for k, v in cols.items()})
