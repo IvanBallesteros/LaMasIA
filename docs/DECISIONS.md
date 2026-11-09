@@ -3,7 +3,6 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
-<<<<<<< HEAD
 ## 2026-11-08 · Clasificador: ni pesos en los cambios ni grupo `turn`; se cierra el modelo (Martina)
 
 **Qué.**
@@ -39,7 +38,7 @@ recientes, arriba.
 
 **Con qué datos.** Solo datasets v2.1: train para medir las señales, validación cruzada en IDSSE y
 val_metrica para los modelos. Nada del partido del reto. Los test siguen sin mirarse.
-=======
+
 ## 2026-11-08 · Entrega: `scripts/make_submission.py` (paquete B)
 
 **Qué.** Un solo comando regenera la entrega: `--train` y luego `--predict`.
@@ -92,7 +91,6 @@ del reto: ningún ajuste lo usa y `--check-public-5min` solo comprueba la alinea
   explícitamente y no depende de eso.
 - El modelo sigue prediciendo menos posesiones de las que hay (247 frente a 315 en IDSSE, 219
   frente a 334 en Metrica).
->>>>>>> b/make-submission
 
 ## 2026-11-07 · Clasificador: fuera el grupo `touches` (Martina)
 
