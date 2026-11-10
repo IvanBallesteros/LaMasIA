@@ -65,8 +65,7 @@ from mtah.features import COLUMNS, MODEL_GROUPS, frame_features  # noqa: E402
 FPS = tc.FPS
 LABELS = "raw"
 STEP = 5                                            # train on one frame in STEP, per match
-HYPERPARAMETERS = {"learning_rate": 0.1, "max_iter": 100, "max_leaf_nodes": 31, "min_samples_leaf": 20,
-                   "random_state": 0, "early_stopping": False}
+HYPERPARAMETERS = tc.HYPERPARAMETERS                # defined once, in src/mtah/train_classifier.py
 MODEL_NAME = "gbm_%s_%s" % (LABELS, "-".join(MODEL_GROUPS))
 CV_NAME = "cv_" + MODEL_NAME
 DATASETS = os.path.join(ROOT, "external", "datasets_v2_1")
