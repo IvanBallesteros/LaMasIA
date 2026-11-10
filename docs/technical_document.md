@@ -52,6 +52,15 @@ It uses 71 signals per frame, in nine groups (`src/mtah/features.py`):
 The `shape` group speaks from the players alone, so it still has information when the ball is
 missing.
 
+Each group was added only if it improved `spellF1` on the IDSSE matches left out in
+cross-validation, with both versions of the labels, and on the Metrica games, by more than the noise
+between matches (paired bootstrap). The challenge match was never used for these choices.
+
+Compared with our first model (groups `ball`, `near`, `context`, `players`, `gap` and `tags`), adding
+`memory`, `edges` and `shape` raises `spellF1` from 0.561 to 0.621 on IDSSE (harmonised labels), from
+0.459 to 0.512 on IDSSE (original labels) and from 0.579 to 0.615 on Metrica. The first model's
+decoder was also fitted on the Metrica games, so its Metrica score is, if anything, optimistic.
+
 ### The decoder
 
 A three-state hidden Markov model (`H`, `A`, `D`), solved with the Viterbi algorithm over each half
@@ -84,9 +93,9 @@ states.
 
 | Idea | Result |
 |---|---|
-| Ball touch detector | No gain. On a smoothed ball, a detected touch is no more common near a change of possession than anywhere else |
+| Ball touch detector (`touches`) | No gain. On a smoothed ball, a detected touch is no more common near a change of possession than anywhere else |
 | Ball direction before and after (`turn`) | Below the noise level |
-| Extra training weight near changes of possession | Below the noise level |
+| Extra training weight near changes of possession (`--change-weight`) | Below the noise level |
 | Other hyperparameters for the classifier | No gain over the defaults |
 
 ## 4. Training data
@@ -188,6 +197,9 @@ used for training or to fit the decoder.
 - **Most of those errors come from the classifier, not the decoder.** In half of the missed
   possessions the classifier already favours the wrong team. Only in 9% does the decoder erase a
   correct prediction.
+- **Changes of possession in open play are harder than restarts.** We recover 48% of the
+  possessions that start right after a rival possession, against 76% of those that start after a
+  dead ball.
 - **Smoothed tracking.** A kick is spread over about 0.6 s, so sharp events such as touches are hard
   to see.
 - **The ball is missing in 41% of the graded frames**, mostly in the hardest moments.
@@ -197,8 +209,8 @@ used for training or to fit the decoder.
 - **Possession rules are learned from other providers' labels**, which differ from the challenge's
   ground truth.
 
-With more time, we would detect the ball in the video during tracking gaps, and train on more matches
-that have video.
+With more time, we would detect the ball in the video during tracking gaps, look for signals of who
+*controls* the ball rather than who is closest to it, and train on more matches that have video.
 
 ## 8. Reproduction
 
