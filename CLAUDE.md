@@ -14,7 +14,7 @@ será público.
   `<equipo>.csv`, la URL de un repo público que regenere *exactamente* ese CSV y un documento técnico
   corto (`<equipo>.pdf` o `.md`).
 - No hay leaderboard ni feedback antes del cierre.
-- La documentación oficial manda: `README.md`, `CHALLENGE.md`, `DATA.md`, `EVALUATION.md`,
+- La documentación oficial manda: `docs/challenge_README.md` (el README original), `CHALLENGE.md`, `DATA.md`, `EVALUATION.md`,
   `RULES.md`, `SUBMISSION.md`, `FAQ.md`. La definición exacta de las métricas está en
   `evaluation/possession_metrics.py`. Ante cualquier duda, léelos antes de proponer nada.
 
