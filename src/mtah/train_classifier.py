@@ -25,8 +25,9 @@ argmax, with no temporal decoding, so spellF1 is expected to be low; every row a
 official baseline (smooth50) on the same frames and labels, as a measure of how hard they are.
 test and test_metrica are never read.
 
-It reads only external/ (public datasets). The hyperparameters default to the library's, plus a
-fixed seed; --tag names a run with other values. Nothing here is tuned on the challenge match.
+It reads only external/ (public datasets). The hyperparameters are HYPERPARAMETERS below, the only
+place they are defined: --tag names a run with other values. Nothing here is tuned on the challenge
+match.
 """
 
 import argparse
@@ -53,6 +54,10 @@ FPS = 25
 CV_SPLITS = ("train", "val")
 LOG_HEADER = ["date", "author", "commit", "change", "bench", "spell_f1", "macro_f1", "possessions",
               "smooth50_spell_f1", "smooth50_macro_f1"]
+# The candidate's model, also what scripts/make_submission.py trains: the library's values, with a fixed
+# seed and early stopping off (its default, "auto", turns it on above 10,000 samples).
+HYPERPARAMETERS = {"learning_rate": 0.1, "max_iter": 100, "max_leaf_nodes": 31, "min_samples_leaf": 20,
+                   "random_state": 0, "early_stopping": False}
 
 
 def set_pieces(xml_path, home, away):
@@ -212,9 +217,9 @@ def run(name, labels, groups, data, splits, args):
                 xs.append(d["features"].iloc[keep][cols])
                 ys.append(d["labels"][labels][keep])
                 ws.append(change_weights(d["labels"][labels], args.change_weight, args.change_window_s)[keep])
-        model = HistGradientBoostingClassifier(random_state=0, early_stopping=False, learning_rate=args.learning_rate,
-                                               max_iter=args.max_iter, max_leaf_nodes=args.max_leaf_nodes,
-                                               min_samples_leaf=args.min_samples_leaf)
+        model = HistGradientBoostingClassifier(**dict(HYPERPARAMETERS, learning_rate=args.learning_rate, max_iter=args.max_iter,
+                                                      max_leaf_nodes=args.max_leaf_nodes,
+                                                      min_samples_leaf=args.min_samples_leaf))
         model.fit(pd.concat(xs, ignore_index=True), np.concatenate(ys), sample_weight=np.concatenate(ws))
         order = [list(model.classes_).index(c) for c in CLASSES]
         for (match, seed) in [x for x in pool if x[0] == held] + metrica:
@@ -276,10 +281,10 @@ def main():
     parser.add_argument("--without", nargs="*", default=[], choices=GROUPS,
                         help="besides the model with every group, one model without each of these (default: none)")
     parser.add_argument("--step", type=int, default=5, help="train on one frame in STEP (per match)")
-    parser.add_argument("--learning-rate", type=float, default=0.1)
-    parser.add_argument("--max-iter", type=int, default=100)
-    parser.add_argument("--max-leaf-nodes", type=int, default=31)
-    parser.add_argument("--min-samples-leaf", type=int, default=20)
+    parser.add_argument("--learning-rate", type=float, default=HYPERPARAMETERS["learning_rate"])
+    parser.add_argument("--max-iter", type=int, default=HYPERPARAMETERS["max_iter"])
+    parser.add_argument("--max-leaf-nodes", type=int, default=HYPERPARAMETERS["max_leaf_nodes"])
+    parser.add_argument("--min-samples-leaf", type=int, default=HYPERPARAMETERS["min_samples_leaf"])
     parser.add_argument("--change-weight", type=float, default=1.0,
                         help="training weight of the frames near a direct H/A change (1: no weighting)")
     parser.add_argument("--change-window-s", type=float, default=1.0, help="seconds on each side of the change")
