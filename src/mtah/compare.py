@@ -6,7 +6,7 @@
         --b external/predictions/cv_gbm_raw_ball-near-context-players-gap-tags/decoder_val_metrica.json
 
 Each side is a decoder file (src/mtah/decoder.py); its classifier's predictions are decoded again
-with the saved parameters. For every match the ground-truth possessions are resampled with
+with the saved parameters (and the change detector it names, if any). For every match the ground-truth possessions are resampled with
 replacement -- the same draws for both pipelines, as the official bootstrap_spell_f1 does for one --
 and the difference B - A is recomputed. A bench's difference is the mean over its matches (IDSSE:
 seeds of a match averaged first), drawn match by match. Scored on both label versions.
@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 for sub in ("src", "tools", "evaluation", "starter"):
     sys.path.insert(0, os.path.join(ROOT, sub))
 
-from mtah.decoder import BENCHES, VERSIONS, decode_items, load_bench  # noqa: E402
+from mtah.decoder import BENCHES, VERSIONS, decode_items, load_bench, pred_datasets  # noqa: E402
 
 DRAWS = 1000
 
@@ -66,23 +66,32 @@ def paired(gt, pred_a, pred_b, rng, draws=DRAWS):
 
 
 def side(path):
+    """Predictions folder, parameters, block and change detector folder (or None) of a decoder file."""
     with open(path) as handle:
         d = json.load(handle)
-    return os.path.dirname(os.path.abspath(path)), d["params"], d.get("block", 5)
+    change = os.path.join(ROOT, d["change"]) if d.get("change") else None
+    return os.path.dirname(os.path.abspath(path)), d["params"], d.get("block", 5), change
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--a", required=True, help="decoder file of pipeline A")
     parser.add_argument("--b", required=True, help="decoder file of pipeline B")
-    parser.add_argument("--datasets", default=os.path.join(ROOT, "external", "datasets"))
+    parser.add_argument("--datasets", default=None,
+                        help="default: the folder A's predictions were made on (external/datasets if they do not say)")
     parser.add_argument("--draws", type=int, default=DRAWS)
     parser.add_argument("--out", default=None, help="write the comparison here (json)")
     args = parser.parse_args()
     import possession_metrics as pm
 
-    (dir_a, prm_a, block_a), (dir_b, prm_b, block_b) = side(args.a), side(args.b)
-    items_a, items_b = load_bench(dir_a, args.datasets), load_bench(dir_b, args.datasets)
+    (dir_a, prm_a, block_a, chg_a), (dir_b, prm_b, block_b, chg_b) = side(args.a), side(args.b)
+    with open(os.path.join(dir_a, "summary.json")) as handle:
+        made_on = json.load(handle).get("datasets")
+    if made_on:
+        _, args.datasets = pred_datasets(dir_a, args.datasets)
+    elif args.datasets is None:                     # predictions from before summary.json named their datasets
+        args.datasets = os.path.join(ROOT, "external", "datasets")
+    items_a, items_b = load_bench(dir_a, args.datasets, chg_a), load_bench(dir_b, args.datasets, chg_b)
     assert sorted(items_a) == sorted(items_b), "the two pipelines were not run on the same matches"
     pred_a, pred_b = decode_items(items_a, prm_a, block_a), decode_items(items_b, prm_b, block_b)
     print("A = %s\nB = %s\npaired bootstrap of spellF1 B - A, %d draws per match, 95%% interval" % (

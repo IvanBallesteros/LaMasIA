@@ -4,6 +4,9 @@
     python scripts/make_submission.py --train          # first, once
     python tests/test_make_submission.py               # about ten minutes
 
+    python scripts/make_submission.py --train --change # EXPERIMENTAL: the turnover detector too
+    python tests/test_make_submission.py --change      # the same checks on the --change path
+
     fake match   fake_data/seed0 end to end through the command itself: the contract of the file,
                  X outside the graded halves, D before the second-half kick-off
     determinism  two runs of the command give the same file, byte for byte (sha256)
@@ -66,14 +69,15 @@ def expect(ok, what, failures):
         failures.append(what)
 
 
-def fake_match(failures, data_dir):
+def fake_match(failures, data_dir, change=False):
     """The command on the fake match, twice: the file's contract and determinism."""
     import possession_metrics as pm
     work = tempfile.mkdtemp(prefix="submission_", dir=os.path.join(ROOT, "fake_data"))
+    flag = ["--change"] if change else []
     try:
         gt = os.path.join(data_dir, "BAR-ATH_possession_gt_fake.csv")
         first = os.path.join(work, "first")
-        out = run_command("--data-dir", data_dir, "--out", first, "--team", "fake", "--check-public-5min", "--public-gt", gt)
+        out = run_command("--data-dir", data_dir, "--out", first, "--team", "fake", "--check-public-5min", "--public-gt", gt, *flag)
         print(out)
         csv = os.path.join(first, "fake.csv")
         labels = read_labels(csv)
@@ -90,14 +94,14 @@ def fake_match(failures, data_dir):
         print("      fake match against its own truth: spellF1 %.3f   macroF1 %.3f (a simulator: says nothing about the method)" % (
             r["spell_f1_mean"], r["macro_f1"]))
         second = os.path.join(work, "second")
-        run_command("--data-dir", data_dir, "--out", second, "--team", "fake", "--check-public-5min", "--public-gt", gt)
+        run_command("--data-dir", data_dir, "--out", second, "--team", "fake", "--check-public-5min", "--public-gt", gt, *flag)
         a, b = sha256(csv), sha256(os.path.join(second, "fake.csv"))
         expect(a == b, "determinism: two runs, same file (sha256 %s)" % a[:16], failures)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def equivalence(failures, datasets, match, seed, decimals):
+def equivalence(failures, datasets, match, seed, decimals, change=False):
     """The command on an exported bank match against the path of the validation."""
     import build_datasets as bd
     from export_challenge_format import export
@@ -106,20 +110,29 @@ def equivalence(failures, datasets, match, seed, decimals):
     try:
         export(datasets, match, seed, work, decimals=decimals)
         out = os.path.join(work, "out")
-        print("--- %s s%d, exported with %d decimals" % (match, seed, decimals))
-        print(run_command("--data-dir", work, "--exported", "--out", out, "--team", "eq", "--save-proba"))
+        print("--- %s s%d, exported with %d decimals%s" % (match, seed, decimals, ", --change" if change else ""))
+        print(run_command("--data-dir", work, "--exported", "--out", out, "--team", "eq", "--save-proba",
+                          *(["--change"] if change else [])))
         labels = read_labels(os.path.join(out, "eq.csv"))
-        proba = np.load(os.path.join(out, "eq_proba.npz"))["p"]
+        saved = np.load(os.path.join(out, "eq_proba.npz"))
+        proba = saved["p"]
 
         model, _ = ms.load_model(ms.MODELS)
-        costs = ms.load_costs()
+        costs = ms.load_change_costs() if change else ms.load_costs()
         m = bd.load_match(datasets, match, seed)
         meta = m["meta"]
         halves = [(a, b) for _, a, b in meta["halves"]]
         d = tc.load(datasets, match, seed, groups=ms.MODEL_GROUPS)
         direct_p = ms.predict_proba(model, d["features"])
         tags = tc.set_pieces(m["smart_tagging"], meta["home"], meta["away"])
-        direct = ms.decode_labels(direct_p, halves, tags, costs)
+        direct_c = None
+        if change:
+            detector, _ = ms.load_change_model(ms.MODELS)
+            direct_c = ms.predict_change(detector, tc.load(datasets, match, seed, groups=ms.CHANGE_GROUPS)["features"])
+            if decimals >= EXACT_DECIMALS:
+                expect(np.array_equal(saved["p_change"], direct_c),
+                       "equivalence %s s%d: identical turnover detector signal (float32, every frame)" % (match, seed), failures)
+        direct = ms.decode_labels(direct_p, halves, tags, costs, direct_c)
 
         g = d["graded"]
         delta = np.abs(proba - direct_p)[g]
@@ -149,12 +162,14 @@ def main():
     parser.add_argument("--fake", default=os.path.join(ROOT, "fake_data", "seed0"))
     parser.add_argument("--datasets", default=ms.DATASETS)
     parser.add_argument("--match", nargs="+", default=["J03WOY", "J03WMX"], help="val matches (seed 0)")
+    parser.add_argument("--change", action="store_true",
+                        help="test the EXPERIMENTAL --change path instead (after make_submission.py --train --change)")
     args = parser.parse_args()
     failures = []
-    fake_match(failures, args.fake)
+    fake_match(failures, args.fake, args.change)
     for match in args.match:
-        equivalence(failures, args.datasets, match, 0, EXACT_DECIMALS)
-    equivalence(failures, args.datasets, args.match[0], 0, 6)
+        equivalence(failures, args.datasets, match, 0, EXACT_DECIMALS, args.change)
+    equivalence(failures, args.datasets, args.match[0], 0, 6, args.change)
     print("\nPASSED" if not failures else "\nFAILED:\n  " + "\n  ".join(failures))
     sys.exit(1 if failures else 0)
 

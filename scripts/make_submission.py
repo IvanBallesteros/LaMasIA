@@ -29,6 +29,13 @@ console output, never anything else from the data folder.
 --check-public-5min adds spellF1 and macroF1 of the file and of smooth50 on the 5 public minutes. It
 is a check that the pipeline is aligned: RULES.md forbids choosing anything with it.
 
+EXPERIMENTAL, off by default: --change adds the turnover detector (src/mtah/change_detector.py), which
+makes the decoder's switch cost depend on the input (src/mtah/decoder.py --change). --train --change
+also fits the detector on the same IDSSE matches and seeds (harmonized labels, +-0.4 s);
+--predict --change decodes with scripts/decoder_idsse_change.json and writes to
+<data-dir>/submission_change, so the candidate's file is never overwritten. Without --change
+nothing differs from the candidate.
+
 Exact reproduction: fixed seeds, pinned libraries (requirements-mtah.txt) and one OpenMP thread,
 because the boosting sums gradients in parallel and the number of threads moves the last bits of the
 model between machines. scripts/decoder_idsse.json and scripts/bank_reference.json are small and
@@ -58,6 +65,7 @@ import games  # noqa: E402
 import heuristic_pipeline as hp  # noqa: E402
 import load_smart_tagging  # noqa: E402
 import possession_metrics as pm  # noqa: E402
+from mtah import change_detector as cd  # noqa: E402
 from mtah import decoder  # noqa: E402
 from mtah import train_classifier as tc  # noqa: E402
 from mtah.features import COLUMNS, MODEL_GROUPS, frame_features  # noqa: E402
@@ -74,6 +82,13 @@ MODELS = os.path.join(ROOT, "external", "models")
 PREDICTIONS = os.path.join(ROOT, "external", "predictions_v2_1")
 COSTS_FILE = os.path.join(HERE, "decoder_idsse.json")
 REFERENCE_FILE = os.path.join(HERE, "bank_reference.json")
+# --change (experimental): the turnover detector, as src/mtah/change_detector.py runs it by default
+CHANGE_GROUPS = cd.DEFAULT_GROUPS
+CHANGE_LABELS = "harmonized"
+CHANGE_RADIUS_S = 0.4
+CHANGE_NAME = "change_gbm_%s_r%g" % (CHANGE_LABELS, CHANGE_RADIUS_S)
+CHANGE_COSTS_FILE = os.path.join(HERE, "decoder_idsse_change.json")
+CHANGE_REFERENCE_FILE = os.path.join(HERE, "bank_reference_change.json")
 LIBRARIES = ("numpy", "pandas", "sklearn", "scipy", "joblib")
 HOME_TAG, AWAY_TAG, NO_TEAM_TAG = "Barcelona", "Atletic Club", "N/A"      # as in the Smart Tagging file
 CHECK_WINDOW_S = (5.0, 15.0)                        # after a window starts: the side taking the restart is near the ball
@@ -144,6 +159,90 @@ def train(args):
     with open(os.path.join(folder, "manifest.json"), "w") as handle:
         json.dump(manifest, handle, indent=2)
     print("model in %s  (%.0f s)\n  model sha256 %s\n  data  sha256 %s" % (folder, time.time() - t0, manifest["model_sha256"], data))
+    if args.change:
+        train_change(args)
+
+
+def change_columns():
+    return [c for g in CHANGE_GROUPS for c in COLUMNS[g]]
+
+
+def change_training_set(datasets):
+    """As training_set, for the turnover detector: its feature groups, its target (a direct H <-> A
+    change within CHANGE_RADIUS_S on the CHANGE_LABELS) and the base rate the decoder centres its
+    log-odds on, over every scored frame of every sequence, as src/mtah/change_detector.py computes it."""
+    import pandas as pd
+    with open(os.path.join(datasets, "splits.json")) as handle:
+        splits = json.load(handle)
+    pool = [tuple(x) for split in tc.CV_SPLITS for x in splits[split]]
+    cols, radius = change_columns(), int(round(CHANGE_RADIUS_S * FPS))
+    xs, ys, every = [], [], []
+    for match in sorted({m for m, _ in pool}):
+        seeds = [s for m, s in pool if m == match]
+        for seed in seeds:
+            d = tc.load(datasets, match, seed, groups=CHANGE_GROUPS)
+            labels = d["labels"][CHANGE_LABELS]
+            scored = d["graded"] & np.isin(labels, tc.CLASSES)
+            target = cd.near_change(labels, radius)
+            keep = np.flatnonzero(scored)[::STEP * len(seeds)]
+            xs.append(d["features"].iloc[keep][cols])
+            ys.append(target[keep])
+            every.append(target[scored])
+    return pd.concat(xs, ignore_index=True), np.concatenate(ys), pool, float(np.mean(np.concatenate(every)))
+
+
+def train_change(args):
+    import joblib
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    t0 = time.time()
+    x, y, pool, base = change_training_set(args.datasets)
+    print("turnover detector training set: %d frames, %.1f%% positive  (%.0f s)" % (len(x), 100 * y.mean(), time.time() - t0))
+    model = HistGradientBoostingClassifier(**HYPERPARAMETERS)
+    model.fit(x, y)
+    folder = os.path.join(args.models_dir, CHANGE_NAME)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "model.joblib")
+    joblib.dump(model, path, compress=3)
+    data = hashlib.sha256(x.to_numpy(np.float32).tobytes() + y.astype(np.uint8).tobytes()).hexdigest()
+    manifest = {"name": CHANGE_NAME, "commit": tc.git_commit(), "datasets": os.path.basename(os.path.normpath(args.datasets)),
+                "datasets_version": DATASETS_VERSION, "groups": list(CHANGE_GROUPS), "columns": change_columns(),
+                "labels": CHANGE_LABELS, "radius_s": CHANGE_RADIUS_S, "base_rate": base, "step": STEP,
+                "hyperparameters": HYPERPARAMETERS, "sequences": [list(p) for p in pool], "training_frames": len(x),
+                "training_data_sha256": data, "model_sha256": sha256_file(path), "libraries": versions(),
+                "omp_num_threads": os.environ["OMP_NUM_THREADS"]}
+    with open(os.path.join(folder, "manifest.json"), "w") as handle:
+        json.dump(manifest, handle, indent=2)
+    print("turnover detector in %s  (%.0f s)\n  model sha256 %s\n  data  sha256 %s" % (
+        folder, time.time() - t0, manifest["model_sha256"], data))
+
+
+def load_change_model(models_dir):
+    """(detector, manifest); stops if it is missing or is not the one this code describes."""
+    import joblib
+    folder = os.path.join(models_dir, CHANGE_NAME)
+    if not os.path.isfile(os.path.join(folder, "manifest.json")):
+        raise SystemExit("no turnover detector in %s: run python scripts/make_submission.py --train --change" % folder)
+    with open(os.path.join(folder, "manifest.json")) as handle:
+        manifest = json.load(handle)
+    if manifest["columns"] != change_columns() or manifest["labels"] != CHANGE_LABELS or manifest["radius_s"] != CHANGE_RADIUS_S:
+        raise SystemExit("the detector in %s is not the one this code describes: run --train --change" % folder)
+    return joblib.load(os.path.join(folder, "model.joblib")), manifest
+
+
+def load_change_costs():
+    """The decoder costs fitted on the IDSSE folds with the detector's out-of-fold signal
+    (src/mtah/decoder.py --change), with the base rate its change_k is centred on."""
+    with open(CHANGE_COSTS_FILE) as handle:
+        costs = json.load(handle)
+    if (costs["trained_on"] != LABELS or list(costs["fit_on"]) != ["idsse"] or "change_k" not in costs["params"]
+            or os.path.basename(costs.get("change", "")) != CHANGE_NAME or "change_base_rate" not in costs):
+        raise SystemExit("%s is not the decoder fitted on IDSSE with the %s detector" % (CHANGE_COSTS_FILE, CHANGE_NAME))
+    return costs
+
+
+def predict_change(model, features):
+    """(n,) float32 probability of a direct change of team within CHANGE_RADIUS_S."""
+    return model.predict_proba(features[change_columns()])[:, list(model.classes_).index(True)].astype(np.float32)
 
 
 def load_model(models_dir):
@@ -178,10 +277,15 @@ def predict_proba(model, features):
     return model.predict_proba(features[columns()])[:, order].astype(np.float32)
 
 
-def decode_labels(proba, halves, tags, costs):
-    """Labels of the decoder for one match: 'X' outside `halves`."""
+def decode_labels(proba, halves, tags, costs, p_change=None):
+    """Labels of the decoder for one match: 'X' outside `halves`. With p_change (--change), the
+    switch cost follows the detector as in src/mtah/decoder.py --change."""
     params = costs["params"]
-    return decoder.decode(proba, halves, tags, [[params[c] for c in decoder.COSTS]], params["tag_margin_s"], costs["block"])[0]
+    change = ks = None
+    if p_change is not None:
+        change, ks = decoder.change_shift(p_change, costs["change_base_rate"]), [params["change_k"]]
+    return decoder.decode(proba, halves, tags, [[params[c] for c in decoder.COSTS]], params["tag_margin_s"], costs["block"],
+                          change, ks)[0]
 
 
 # ==================================================================================================
@@ -285,9 +389,9 @@ def summarise(labels, play):
 def bank_reference(args):
     """scripts/bank_reference.json: the same aggregates on the banks, from the candidate's
     out-of-fold predictions decoded with the same costs. Public data only."""
-    costs = load_costs()
+    costs = load_change_costs() if args.change else load_costs()
     pred = os.path.join(args.predictions, CV_NAME)
-    items = decoder.load_bench(pred, args.datasets)
+    items = decoder.load_bench(pred, args.datasets, os.path.join(args.predictions, CHANGE_NAME) if args.change else None)
     decoded = decoder.decode_items(items, costs["params"], costs["block"])
     rows = {b: {"decoded": [], "truth_harmonized": [], "truth_raw": []} for b in decoder.BENCHES}
     for key, it in items.items():
@@ -297,15 +401,18 @@ def bank_reference(args):
     out = {"model": CV_NAME, "datasets": os.path.basename(os.path.normpath(args.datasets)), "params": costs["params"],
            "note": "Same numbers as --predict prints, on the out-of-fold predictions of the IDSSE train + val "
                    "matches and on the val_metrica ensemble. Public data only."}
+    if args.change:
+        out["change"] = CHANGE_NAME
     for bench, by_name in rows.items():
         out[bench] = {name: tc.by_match(r, SUMMARY_KEYS) for name, r in by_name.items()}
-    with open(REFERENCE_FILE, "w", newline="\n") as handle:
+    path = CHANGE_REFERENCE_FILE if args.change else REFERENCE_FILE
+    with open(path, "w", newline="\n") as handle:
         json.dump(out, handle, indent=2)
         handle.write("\n")
-    print("bank reference in %s" % REFERENCE_FILE)
+    print("bank reference in %s" % path)
 
 
-def print_aggregates(labels, game):
+def print_aggregates(labels, game, reference=REFERENCE_FILE):
     print("\nrows per label")
     codes = pm.label_codes(labels)
     for k, name in enumerate(pm.LABELS):
@@ -315,8 +422,8 @@ def print_aggregates(labels, game):
     s = summarise(labels, game["play"])
     print("\npossessions per half: %s" % " / ".join(str(x) for x in s["per_half"]))
     columns_ = [("this match", s)]
-    if os.path.isfile(REFERENCE_FILE):
-        with open(REFERENCE_FILE) as handle:
+    if os.path.isfile(reference):
+        with open(reference) as handle:
             ref = json.load(handle)
         columns_ += [("IDSSE CV", ref["idsse"]["decoded"]), ("IDSSE truth", ref["idsse"]["truth_harmonized"]),
                      ("val_metrica", ref["val_metrica"]["decoded"]), ("Metrica truth", ref["val_metrica"]["truth_harmonized"])]
@@ -352,34 +459,42 @@ def predict(args):
     t0 = time.time()
     game = exported_game(args.data_dir) if args.exported else challenge_game()
     model, manifest = load_model(args.models_dir)
-    costs = load_costs()
+    costs = load_change_costs() if args.change else load_costs()
     print("model %s (commit %s, datasets %s); decoder %s" % (manifest["name"], manifest["commit"], manifest["datasets"], costs["params"]))
+    if args.change:
+        change_model, change_manifest = load_change_model(args.models_dir)
+        print("EXPERIMENTAL --change: turnover detector %s (commit %s)" % (change_manifest["name"], change_manifest["commit"]))
     players, ball, slot_team, windows = read_match(game, args.data_dir)
     features = frame_features(players, slot_team, ball, game["pitch"], game["play"], windows, MODEL_GROUPS)
     team_check(features, windows)
     proba = predict_proba(model, features)
-    labels = decode_labels(proba, game["play"], windows, costs)
+    p_change = None
+    if args.change:
+        change_features = frame_features(players, slot_team, ball, game["pitch"], game["play"], windows, CHANGE_GROUPS)
+        p_change = predict_change(change_model, change_features)
+    labels = decode_labels(proba, game["play"], windows, costs, p_change)
     for a, b in game["forced_dead"]:
         labels[a:b + 1] = "D"
-    out_dir = args.out or os.path.join(args.data_dir, "submission")
+    out_dir = args.out or os.path.join(args.data_dir, "submission_change" if args.change else "submission")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "%s.csv" % args.team)
     with open(path, "w", newline="\n") as handle:
         handle.write("frame,label\n")
         handle.writelines("%d,%s\n" % (f, v) for f, v in enumerate(labels.tolist()))
     if args.save_proba:
-        np.savez_compressed(os.path.join(out_dir, "%s_proba.npz" % args.team), p=proba, classes=tc.CLASSES)
+        extra = {"p_change": p_change} if p_change is not None else {}
+        np.savez_compressed(os.path.join(out_dir, "%s_proba.npz" % args.team), p=proba, classes=tc.CLASSES, **extra)
     check = subprocess.run([sys.executable, os.path.join(ROOT, "evaluation", "validate_submission.py"), path, "--rows", str(game["n"])],
                            capture_output=True, text=True)
     print("\nevaluation/validate_submission.py: %s" % ("OK" if check.returncode == 0 else "FAILED"))
     if check.returncode != 0:
         print(check.stdout)                                 # the format problem; it quotes no match data
         raise SystemExit("the file does not pass the official validation")
-    print_aggregates(labels, game)
+    print_aggregates(labels, game, CHANGE_REFERENCE_FILE if args.change else REFERENCE_FILE)
     if args.check_public_5min:
         check_public(labels, players, ball, slot_team, args.public_gt or public_gt_path())
     print("\n%s  sha256 %s  (%.0f s; in %s)" % (os.path.basename(path), sha256_file(path), time.time() - t0,
-                                                "--out" if args.out else "<data-dir>/submission"))
+                                                "--out" if args.out else "<data-dir>/" + os.path.basename(out_dir)))
 
 
 def main():
@@ -398,6 +513,9 @@ def main():
     parser.add_argument("--exported", action="store_true", help="--data-dir is a tools/export_challenge_format.py output (tests)")
     parser.add_argument("--save-proba", action="store_true", help="also write the probabilities next to the CSV (tests)")
     parser.add_argument("--debug", action="store_true", help="show tracebacks: fake data only, they can quote the input")
+    parser.add_argument("--change", action="store_true",
+                        help="EXPERIMENTAL: add the turnover detector (train it with --train, decode with "
+                             "scripts/decoder_idsse_change.json, write to <data-dir>/submission_change)")
     args = parser.parse_args()
     run_all = not (args.train or args.predict or args.bank_reference)
     try:
