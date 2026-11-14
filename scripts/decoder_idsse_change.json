@@ -1,0 +1,1271 @@
+{
+  "provisional": true,
+  "block": 5,
+  "trained_on": "raw",
+  "fit_on": [
+    "idsse"
+  ],
+  "target": "harmonized",
+  "params": {
+    "switch": 32,
+    "to_dead": 64,
+    "from_dead": 16,
+    "from_dead_tag": 4,
+    "tag_margin_s": 2,
+    "change_k": 4
+  },
+  "report": {
+    "harmonized": {
+      "scores": {
+        "idsse": {
+          "spell_f1": 0.6269663418383064,
+          "macro_f1": 0.896993498940592,
+          "possessions": 257.5
+        },
+        "val_metrica": {
+          "spell_f1": 0.6327831231248178,
+          "macro_f1": 0.9043983153905801,
+          "possessions": 230.5
+        }
+      },
+      "rows": {
+        "idsse": [
+          {
+            "spell_f1": 0.5963272120200334,
+            "macro_f1": 0.9020842936271105,
+            "accuracy": 0.9102262840231011,
+            "possessions": 249,
+            "match": "J03WMX",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.5627586206896551,
+            "macro_f1": 0.8585817387173403,
+            "accuracy": 0.8877303777170266,
+            "possessions": 244,
+            "match": "J03WN1",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.5976627712854758,
+            "macro_f1": 0.8759198686492708,
+            "accuracy": 0.9027839588587252,
+            "possessions": 263,
+            "match": "J03WN1",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.6427046263345195,
+            "macro_f1": 0.9038337372919049,
+            "accuracy": 0.9164808255717347,
+            "possessions": 250,
+            "match": "J03WOH",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6454212454212455,
+            "macro_f1": 0.8986233852244939,
+            "accuracy": 0.9110221989009868,
+            "possessions": 234,
+            "match": "J03WOH",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.6077051926298157,
+            "macro_f1": 0.8947020011955914,
+            "accuracy": 0.9102542515575013,
+            "possessions": 271,
+            "match": "J03WOY",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6762645914396888,
+            "macro_f1": 0.908188040595774,
+            "accuracy": 0.9234462523339557,
+            "possessions": 237,
+            "match": "J03WPY",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.7056092843326885,
+            "macro_f1": 0.9166807050467335,
+            "accuracy": 0.930395113910718,
+            "possessions": 240,
+            "match": "J03WPY",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.6441379310344828,
+            "macro_f1": 0.9027685672348845,
+            "accuracy": 0.9101338297797604,
+            "possessions": 293,
+            "match": "J03WQQ",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6409722222222222,
+            "macro_f1": 0.9057533548812993,
+            "accuracy": 0.9127893498191014,
+            "possessions": 289,
+            "match": "J03WQQ",
+            "seed": 1
+          }
+        ],
+        "val_metrica": [
+          {
+            "spell_f1": 0.6251290877796902,
+            "macro_f1": 0.9045668835969067,
+            "accuracy": 0.9135277160945064,
+            "possessions": 231,
+            "match": "METRICA1",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6404371584699454,
+            "macro_f1": 0.9042297471842536,
+            "accuracy": 0.9091997506305081,
+            "possessions": 230,
+            "match": "METRICA2",
+            "seed": 0
+          }
+        ]
+      },
+      "idsse": {
+        "smooth50": {
+          "spell_f1": 0.24006216201717812,
+          "macro_f1": 0.6256204970922941,
+          "possessions": 538.1666666666666
+        },
+        "truth_possessions": 314.6666666666667
+      },
+      "val_metrica": {
+        "smooth50": {
+          "spell_f1": 0.26338463070870066,
+          "macro_f1": 0.6393796231322216,
+          "possessions": 516.5
+        },
+        "truth_possessions": 334.5
+      }
+    },
+    "raw": {
+      "scores": {
+        "idsse": {
+          "spell_f1": 0.5255077348981945,
+          "macro_f1": 0.8855713054430644,
+          "possessions": 257.5
+        },
+        "val_metrica": {
+          "spell_f1": 0.6327831231248178,
+          "macro_f1": 0.9043983153905801,
+          "possessions": 230.5
+        }
+      },
+      "rows": {
+        "idsse": [
+          {
+            "spell_f1": 0.45736842105263154,
+            "macro_f1": 0.8860149504021737,
+            "accuracy": 0.8965245569203998,
+            "possessions": 249,
+            "match": "J03WMX",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.4548387096774194,
+            "macro_f1": 0.8468383161365597,
+            "accuracy": 0.879274658980934,
+            "possessions": 244,
+            "match": "J03WN1",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.4692005242463958,
+            "macro_f1": 0.8604814981782783,
+            "accuracy": 0.8916226926907834,
+            "possessions": 263,
+            "match": "J03WN1",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.5785276073619632,
+            "macro_f1": 0.8961803863420797,
+            "accuracy": 0.9105120468756832,
+            "possessions": 250,
+            "match": "J03WOH",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.5484276729559749,
+            "macro_f1": 0.8867826983932124,
+            "accuracy": 0.90181031090122,
+            "possessions": 234,
+            "match": "J03WOH",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.5320495185694635,
+            "macro_f1": 0.8840889168568195,
+            "accuracy": 0.9017371050120672,
+            "possessions": 271,
+            "match": "J03WOY",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.539209726443769,
+            "macro_f1": 0.8929782314838727,
+            "accuracy": 0.9111489559609058,
+            "possessions": 237,
+            "match": "J03WPY",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.5549167927382754,
+            "macro_f1": 0.9023355886276078,
+            "accuracy": 0.9186860085766461,
+            "possessions": 240,
+            "match": "J03WPY",
+            "seed": 1
+          },
+          {
+            "spell_f1": 0.5815561959654179,
+            "macro_f1": 0.8983271844877335,
+            "accuracy": 0.9062067512030629,
+            "possessions": 293,
+            "match": "J03WQQ",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6005797101449276,
+            "macro_f1": 0.9027240271494423,
+            "accuracy": 0.910070603112157,
+            "possessions": 289,
+            "match": "J03WQQ",
+            "seed": 1
+          }
+        ],
+        "val_metrica": [
+          {
+            "spell_f1": 0.6251290877796902,
+            "macro_f1": 0.9045668835969067,
+            "accuracy": 0.9135277160945064,
+            "possessions": 231,
+            "match": "METRICA1",
+            "seed": 0
+          },
+          {
+            "spell_f1": 0.6404371584699454,
+            "macro_f1": 0.9042297471842536,
+            "accuracy": 0.9091997506305081,
+            "possessions": 230,
+            "match": "METRICA2",
+            "seed": 0
+          }
+        ]
+      },
+      "idsse": {
+        "smooth50": {
+          "spell_f1": 0.22608368172537016,
+          "macro_f1": 0.6174002667315147,
+          "possessions": 538.1666666666666
+        },
+        "truth_possessions": 448.5
+      },
+      "val_metrica": {
+        "smooth50": {
+          "spell_f1": 0.26338463070870066,
+          "macro_f1": 0.6393796231322216,
+          "possessions": 516.5
+        },
+        "truth_possessions": 334.5
+      }
+    }
+  },
+  "trace": [
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 4,
+      "objective": 0.5630998257792001,
+      "idsse": 0.5630998257792001,
+      "val_metrica": 0.6407232676560837
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 8,
+      "objective": 0.5872817145815054,
+      "idsse": 0.5872817145815054,
+      "val_metrica": 0.6508496323205106
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 16,
+      "objective": 0.610719090133291,
+      "idsse": 0.610719090133291,
+      "val_metrica": 0.6438510679037057
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 32,
+      "objective": 0.6152587290808973,
+      "idsse": 0.6152587290808973,
+      "val_metrica": 0.6143020465595437
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 64,
+      "objective": 0.6041427498281338,
+      "idsse": 0.6041427498281338,
+      "val_metrica": 0.5727332642877319
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 128,
+      "objective": 0.6060699448649269,
+      "idsse": 0.6060699448649269,
+      "val_metrica": 0.5710223833404913
+    },
+    {
+      "pass": 1,
+      "param": "switch",
+      "value": 256,
+      "objective": 0.6060699448649269,
+      "idsse": 0.6060699448649269,
+      "val_metrica": 0.5710223833404913
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 2,
+      "objective": 0.6090823059068059,
+      "idsse": 0.6090823059068059,
+      "val_metrica": 0.5969587008408159
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 4,
+      "objective": 0.608693092132373,
+      "idsse": 0.608693092132373,
+      "val_metrica": 0.6022450642131492
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 8,
+      "objective": 0.6119523375612879,
+      "idsse": 0.6119523375612879,
+      "val_metrica": 0.607585201385092
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 16,
+      "objective": 0.6152587290808973,
+      "idsse": 0.6152587290808973,
+      "val_metrica": 0.6143020465595437
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 32,
+      "objective": 0.6180356505904256,
+      "idsse": 0.6180356505904256,
+      "val_metrica": 0.6145833333333334
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 64,
+      "objective": 0.6209679691578319,
+      "idsse": 0.6209679691578319,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 128,
+      "objective": 0.6161284677393832,
+      "idsse": 0.6161284677393832,
+      "val_metrica": 0.6090254765250126
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 256,
+      "objective": 0.6111443877898921,
+      "idsse": 0.6111443877898921,
+      "val_metrica": 0.6052607203826716
+    },
+    {
+      "pass": 1,
+      "param": "to_dead",
+      "value": 512,
+      "objective": 0.5907183626707042,
+      "idsse": 0.5907183626707042,
+      "val_metrica": 0.5811443378387842
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 4,
+      "objective": 0.6196906930500793,
+      "idsse": 0.6196906930500793,
+      "val_metrica": 0.6140409033633808
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 8,
+      "objective": 0.6198649269731722,
+      "idsse": 0.6198649269731722,
+      "val_metrica": 0.6138700896859535
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 16,
+      "objective": 0.620897713033847,
+      "idsse": 0.620897713033847,
+      "val_metrica": 0.6142729068135752
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 32,
+      "objective": 0.6209679691578319,
+      "idsse": 0.6209679691578319,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 64,
+      "objective": 0.6205040465168219,
+      "idsse": 0.6205040465168219,
+      "val_metrica": 0.6150393404544191
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 128,
+      "objective": 0.6192298363715522,
+      "idsse": 0.6192298363715522,
+      "val_metrica": 0.6134633788230358
+    },
+    {
+      "pass": 1,
+      "param": "from_dead",
+      "value": 256,
+      "objective": 0.6189173786210036,
+      "idsse": 0.6189173786210036,
+      "val_metrica": 0.609617801531969
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 0,
+      "objective": 0.6211178282560605,
+      "idsse": 0.6211178282560605,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 1,
+      "objective": 0.6209679691578319,
+      "idsse": 0.6209679691578319,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 2,
+      "objective": 0.6209679691578319,
+      "idsse": 0.6209679691578319,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 4,
+      "objective": 0.6209679691578319,
+      "idsse": 0.6209679691578319,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 8,
+      "objective": 0.6204527251447204,
+      "idsse": 0.6204527251447204,
+      "val_metrica": 0.6132312524538673
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 16,
+      "objective": 0.6194065781428805,
+      "idsse": 0.6194065781428805,
+      "val_metrica": 0.6132312524538673
+    },
+    {
+      "pass": 1,
+      "param": "from_dead_tag",
+      "value": 32,
+      "objective": 0.6197347680283122,
+      "idsse": 0.6197347680283122,
+      "val_metrica": 0.6141199606686333
+    },
+    {
+      "pass": 1,
+      "param": "tag_margin_s",
+      "value": 0,
+      "objective": 0.620943620543193,
+      "idsse": 0.620943620543193,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "tag_margin_s",
+      "value": 1,
+      "objective": 0.6211178282560605,
+      "idsse": 0.6211178282560605,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "tag_margin_s",
+      "value": 2,
+      "objective": 0.6212329723950449,
+      "idsse": 0.6212329723950449,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "tag_margin_s",
+      "value": 4,
+      "objective": 0.6211353415844827,
+      "idsse": 0.6211353415844827,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "tag_margin_s",
+      "value": 8,
+      "objective": 0.6208987356932844,
+      "idsse": 0.6208987356932844,
+      "val_metrica": 0.6146772421572175
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 0,
+      "objective": 0.6212329723950449,
+      "idsse": 0.6212329723950449,
+      "val_metrica": 0.6145046145405382
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 0.5,
+      "objective": 0.6216419661049741,
+      "idsse": 0.6216419661049741,
+      "val_metrica": 0.6168782249742002
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 1,
+      "objective": 0.6220922638850424,
+      "idsse": 0.6220922638850424,
+      "val_metrica": 0.6207939119703827
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 2,
+      "objective": 0.6223897167730944,
+      "idsse": 0.6223897167730944,
+      "val_metrica": 0.6239042680494615
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 4,
+      "objective": 0.62671180067643,
+      "idsse": 0.62671180067643,
+      "val_metrica": 0.6330654412969756
+    },
+    {
+      "pass": 1,
+      "param": "change_k",
+      "value": 8,
+      "objective": 0.6242815816560613,
+      "idsse": 0.6242815816560613,
+      "val_metrica": 0.64743391027297
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 4,
+      "objective": 0.49783681723538953,
+      "idsse": 0.49783681723538953,
+      "val_metrica": 0.5830622384398128
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 8,
+      "objective": 0.5510962269715528,
+      "idsse": 0.5510962269715528,
+      "val_metrica": 0.6393448318042813
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 16,
+      "objective": 0.6069255626282396,
+      "idsse": 0.6069255626282396,
+      "val_metrica": 0.6503525038886531
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 32,
+      "objective": 0.62671180067643,
+      "idsse": 0.62671180067643,
+      "val_metrica": 0.6330654412969756
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 64,
+      "objective": 0.6118256772462359,
+      "idsse": 0.6118256772462359,
+      "val_metrica": 0.5735802116099514
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 128,
+      "objective": 0.5819127602346397,
+      "idsse": 0.5819127602346397,
+      "val_metrica": 0.5292387259834781
+    },
+    {
+      "pass": 2,
+      "param": "switch",
+      "value": 256,
+      "objective": 0.58149830164215,
+      "idsse": 0.58149830164215,
+      "val_metrica": 0.5288338676838829
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 2,
+      "objective": 0.6071394479332278,
+      "idsse": 0.6071394479332278,
+      "val_metrica": 0.6068645817510816
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 4,
+      "objective": 0.6109757423223775,
+      "idsse": 0.6109757423223775,
+      "val_metrica": 0.6142657782607452
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 8,
+      "objective": 0.6159312850320057,
+      "idsse": 0.6159312850320057,
+      "val_metrica": 0.6194400178106911
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 16,
+      "objective": 0.6201811025715285,
+      "idsse": 0.6201811025715285,
+      "val_metrica": 0.6318245235177794
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 32,
+      "objective": 0.6225278237385893,
+      "idsse": 0.6225278237385893,
+      "val_metrica": 0.6321542618521248
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 64,
+      "objective": 0.62671180067643,
+      "idsse": 0.62671180067643,
+      "val_metrica": 0.6330654412969756
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 128,
+      "objective": 0.6218421789691954,
+      "idsse": 0.6218421789691954,
+      "val_metrica": 0.6301470588235294
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 256,
+      "objective": 0.617939328822236,
+      "idsse": 0.617939328822236,
+      "val_metrica": 0.6239149713093375
+    },
+    {
+      "pass": 2,
+      "param": "to_dead",
+      "value": 512,
+      "objective": 0.5981426316009856,
+      "idsse": 0.5981426316009856,
+      "val_metrica": 0.6014862424879404
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 4,
+      "objective": 0.6252908641103669,
+      "idsse": 0.6252908641103669,
+      "val_metrica": 0.6325008576329332
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 8,
+      "objective": 0.6257592626934906,
+      "idsse": 0.6257592626934906,
+      "val_metrica": 0.6323511402686659
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 16,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 32,
+      "objective": 0.62671180067643,
+      "idsse": 0.62671180067643,
+      "val_metrica": 0.6330654412969756
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 64,
+      "objective": 0.6264736954729161,
+      "idsse": 0.6264736954729161,
+      "val_metrica": 0.6336056878741192
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 128,
+      "objective": 0.6252558475061478,
+      "idsse": 0.6252558475061478,
+      "val_metrica": 0.6320864274057864
+    },
+    {
+      "pass": 2,
+      "param": "from_dead",
+      "value": 256,
+      "objective": 0.6251052916079938,
+      "idsse": 0.6251052916079938,
+      "val_metrica": 0.6283685680095732
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 0,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 1,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 2,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 8,
+      "objective": 0.6264082478637482,
+      "idsse": 0.6264082478637482,
+      "val_metrica": 0.6315426460796261
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 16,
+      "objective": 0.6254427391101757,
+      "idsse": 0.6254427391101757,
+      "val_metrica": 0.6315426460796261
+    },
+    {
+      "pass": 2,
+      "param": "from_dead_tag",
+      "value": 32,
+      "objective": 0.6253865587255214,
+      "idsse": 0.6253865587255214,
+      "val_metrica": 0.63242637805185
+    },
+    {
+      "pass": 2,
+      "param": "tag_margin_s",
+      "value": 0,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "tag_margin_s",
+      "value": 1,
+      "objective": 0.6268550452328528,
+      "idsse": 0.6268550452328528,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "tag_margin_s",
+      "value": 2,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "tag_margin_s",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "tag_margin_s",
+      "value": 8,
+      "objective": 0.6267969702684542,
+      "idsse": 0.6267969702684542,
+      "val_metrica": 0.6329333558672751
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 0,
+      "objective": 0.6209547906594178,
+      "idsse": 0.6209547906594178,
+      "val_metrica": 0.6142729068135752
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 0.5,
+      "objective": 0.6215819329610123,
+      "idsse": 0.6215819329610123,
+      "val_metrica": 0.6166452813241804
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 1,
+      "objective": 0.6219674943967539,
+      "idsse": 0.6219674943967539,
+      "val_metrica": 0.6205485407409774
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 2,
+      "objective": 0.6226695920572004,
+      "idsse": 0.6226695920572004,
+      "val_metrica": 0.6236482754680328
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 2,
+      "param": "change_k",
+      "value": 8,
+      "objective": 0.6243147019738978,
+      "idsse": 0.6243147019738978,
+      "val_metrica": 0.6471064064125314
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 4,
+      "objective": 0.49752907217528825,
+      "idsse": 0.49752907217528825,
+      "val_metrica": 0.5829376687091378
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 8,
+      "objective": 0.5507002266807689,
+      "idsse": 0.5507002266807689,
+      "val_metrica": 0.6390721187563313
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 16,
+      "objective": 0.6067836290878157,
+      "idsse": 0.6067836290878157,
+      "val_metrica": 0.650021535015936
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 32,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 64,
+      "objective": 0.6118111242716092,
+      "idsse": 0.6118111242716092,
+      "val_metrica": 0.5729632691291098
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 128,
+      "objective": 0.5894413260070402,
+      "idsse": 0.5894413260070402,
+      "val_metrica": 0.528380355276907
+    },
+    {
+      "pass": 3,
+      "param": "switch",
+      "value": 256,
+      "objective": 0.5894413260070402,
+      "idsse": 0.5894413260070402,
+      "val_metrica": 0.528380355276907
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 2,
+      "objective": 0.6125497470243696,
+      "idsse": 0.6125497470243696,
+      "val_metrica": 0.6058006656594686
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 4,
+      "objective": 0.6137779368668511,
+      "idsse": 0.6137779368668511,
+      "val_metrica": 0.6120076699834163
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 8,
+      "objective": 0.6156691240207147,
+      "idsse": 0.6156691240207147,
+      "val_metrica": 0.6200467057827598
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 16,
+      "objective": 0.6191994413714202,
+      "idsse": 0.6191994413714202,
+      "val_metrica": 0.6251789826250786
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 32,
+      "objective": 0.6221204957389923,
+      "idsse": 0.6221204957389923,
+      "val_metrica": 0.6338243949091444
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 64,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 128,
+      "objective": 0.6228321240486613,
+      "idsse": 0.6228321240486613,
+      "val_metrica": 0.6289769589960136
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 256,
+      "objective": 0.6180355030632294,
+      "idsse": 0.6180355030632294,
+      "val_metrica": 0.6251659680820598
+    },
+    {
+      "pass": 3,
+      "param": "to_dead",
+      "value": 512,
+      "objective": 0.5975988065820035,
+      "idsse": 0.5975988065820035,
+      "val_metrica": 0.6021749896405001
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 4,
+      "objective": 0.6252908641103669,
+      "idsse": 0.6252908641103669,
+      "val_metrica": 0.6325008576329332
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 8,
+      "objective": 0.6257592626934906,
+      "idsse": 0.6257592626934906,
+      "val_metrica": 0.6323511402686659
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 16,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 32,
+      "objective": 0.62671180067643,
+      "idsse": 0.62671180067643,
+      "val_metrica": 0.6330654412969756
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 64,
+      "objective": 0.6264736954729161,
+      "idsse": 0.6264736954729161,
+      "val_metrica": 0.6336056878741192
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 128,
+      "objective": 0.6252558475061478,
+      "idsse": 0.6252558475061478,
+      "val_metrica": 0.6320864274057864
+    },
+    {
+      "pass": 3,
+      "param": "from_dead",
+      "value": 256,
+      "objective": 0.6250793505497839,
+      "idsse": 0.6250793505497839,
+      "val_metrica": 0.6283685680095732
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 0,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 1,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 2,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 8,
+      "objective": 0.6264082478637482,
+      "idsse": 0.6264082478637482,
+      "val_metrica": 0.6315426460796261
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 16,
+      "objective": 0.6254427391101757,
+      "idsse": 0.6254427391101757,
+      "val_metrica": 0.6315426460796261
+    },
+    {
+      "pass": 3,
+      "param": "from_dead_tag",
+      "value": 32,
+      "objective": 0.6253865587255214,
+      "idsse": 0.6253865587255214,
+      "val_metrica": 0.63242637805185
+    },
+    {
+      "pass": 3,
+      "param": "tag_margin_s",
+      "value": 0,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "tag_margin_s",
+      "value": 1,
+      "objective": 0.6268550452328528,
+      "idsse": 0.6268550452328528,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "tag_margin_s",
+      "value": 2,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "tag_margin_s",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "tag_margin_s",
+      "value": 8,
+      "objective": 0.6267969702684542,
+      "idsse": 0.6267969702684542,
+      "val_metrica": 0.6329333558672751
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 0,
+      "objective": 0.6209547906594178,
+      "idsse": 0.6209547906594178,
+      "val_metrica": 0.6142729068135752
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 0.5,
+      "objective": 0.6215819329610123,
+      "idsse": 0.6215819329610123,
+      "val_metrica": 0.6166452813241804
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 1,
+      "objective": 0.6219674943967539,
+      "idsse": 0.6219674943967539,
+      "val_metrica": 0.6205485407409774
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 2,
+      "objective": 0.6226695920572004,
+      "idsse": 0.6226695920572004,
+      "val_metrica": 0.6236482754680328
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 4,
+      "objective": 0.6269663418383064,
+      "idsse": 0.6269663418383064,
+      "val_metrica": 0.6327831231248178
+    },
+    {
+      "pass": 3,
+      "param": "change_k",
+      "value": 8,
+      "objective": 0.6243147019738978,
+      "idsse": 0.6243147019738978,
+      "val_metrica": 0.6471064064125314
+    }
+  ],
+  "change": "external/predictions_v2_1/change_gbm_harmonized_r0.4",
+  "change_base_rate": 0.030246668517002598
+}

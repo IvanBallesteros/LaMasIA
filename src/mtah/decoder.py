@@ -32,6 +32,13 @@ restart by construction -- the real tagging's timing is unknown. Refit once the 
 
 Decoding runs on blocks of --block frames (log-probabilities summed, so the costs mean the same
 at any block size); the result is expanded back to frames.
+
+--change DIR (src/mtah/change_detector.py output) makes the switch cost depend on the input: in each
+block it is max(0, switch - change_k * s), s being the detector's log-odds that the ball changes team
+there, centred on its base rate (s = 0 where the detector is at its average, so switch keeps its
+meaning). change_k joins the fit (CHANGE_GRID); change_k 0 is the plain decoder, bit for bit. The
+fitted file is decoder_<fit-on>[_raw]_<DIR name>.json and names DIR. Without --change nothing
+changes.
 """
 
 import argparse
@@ -59,6 +66,8 @@ GRID = {"switch": (4, 8, 16, 32, 64, 128, 256), "to_dead": (2, 4, 8, 16, 32, 64,
         "tag_margin_s": (0, 1, 2, 4, 8)}
 START = {"switch": 32, "to_dead": 16, "from_dead": 32, "from_dead_tag": 4, "tag_margin_s": 1}
 MIN_P = 1e-4
+CHANGE_GRID = (0, 0.5, 1, 2, 4, 8)      # change_k, only with --change
+CHANGE_CLIP = 1e-4                      # p_change kept in [CHANGE_CLIP, 1 - CHANGE_CLIP] before the log-odds
 
 
 def transitions(costs):
@@ -70,15 +79,23 @@ def transitions(costs):
     return out - fd * live, out - ft * live
 
 
-def viterbi(logp, zone, costs):
+def viterbi(logp, zone, costs, shift=None, ks=None):
     """Best state path for each of K cost settings at once. logp (n, 3), zone (n,) bool, costs
-    (K, 4). Returns (K, n) state indices."""
+    (K, 4). With shift (n,) and ks (K,), the switch cost of step t is max(0, switch - k * shift[t]).
+    Returns (K, n) state indices."""
     n, k = len(logp), len(costs)
-    plain, tagged = transitions(np.asarray(costs, dtype=np.float64))
+    costs = np.asarray(costs, dtype=np.float64)
+    plain, tagged = transitions(costs)
+    if shift is not None:
+        ks = np.asarray(ks, dtype=np.float64)
     back = np.empty((n, k, 3), dtype=np.int8)
     delta = np.repeat(logp[None, 0], k, axis=0)
     for t in range(1, n):
-        cand = delta[:, :, None] + (tagged if zone[t] else plain)
+        trans = tagged if zone[t] else plain
+        if shift is not None:
+            trans = trans.copy()
+            trans[:, 0, 1] = trans[:, 1, 0] = -np.maximum(costs[:, 0] - ks * shift[t], 0.0)
+        cand = delta[:, :, None] + trans
         back[t] = cand.argmax(axis=1)
         delta = np.take_along_axis(cand, back[t][:, None, :].astype(np.intp), axis=1)[:, 0, :] + logp[t]
     path = np.empty((k, n), dtype=np.int8)
@@ -97,8 +114,17 @@ def tag_zone(tags, n, margin_s):
     return zone
 
 
-def decode(proba, halves, tags, costs, margin_s, block=5):
-    """Labels (K, n) for K cost settings; 'X' outside the halves."""
+def change_shift(p_change, base_rate):
+    """The detector's log-odds per frame, centred on its base rate."""
+    def logit(x):
+        return np.log(x) - np.log1p(-x)
+    p = np.clip(np.asarray(p_change, dtype=np.float64), CHANGE_CLIP, 1 - CHANGE_CLIP)
+    return logit(p) - logit(base_rate)
+
+
+def decode(proba, halves, tags, costs, margin_s, block=5, change=None, ks=None):
+    """Labels (K, n) for K cost settings; 'X' outside the halves. change: change_shift() per frame
+    (a block takes its largest value) and ks the change_k of each setting, or None."""
     costs = np.atleast_2d(costs)
     n = len(proba)
     out = np.full((len(costs), n), "X", dtype="<U1")
@@ -110,7 +136,10 @@ def decode(proba, halves, tags, costs, margin_s, block=5):
         pad = nb * block - m
         lp = np.concatenate([logp[a:b + 1], np.zeros((pad, 3))]).reshape(nb, block, 3).sum(axis=1)
         zb = np.concatenate([zone[a:b + 1], np.zeros(pad, dtype=bool)]).reshape(nb, block).any(axis=1)
-        path = viterbi(lp, zb, costs)
+        sb = None
+        if change is not None:
+            sb = np.concatenate([change[a:b + 1], np.full(pad, -np.inf)]).reshape(nb, block).max(axis=1)
+        path = viterbi(lp, zb, costs, sb, ks)
         out[:, a:b + 1] = STATES[np.repeat(path, block, axis=1)[:, :m]]
     return out
 
@@ -119,10 +148,20 @@ VERSIONS = ("harmonized", "raw")
 BENCHES = ("idsse", "val_metrica")
 
 
-def load_bench(pred_dir, datasets):
+def load_change(change_dir, datasets):
+    """change_detector.py's summary, refused if it was made on other datasets."""
+    with open(os.path.join(change_dir, "summary.json")) as handle:
+        summary = json.load(handle)
+    if summary["datasets"] != os.path.basename(os.path.normpath(datasets)):
+        raise SystemExit("%s was made on external/%s, not on %s" % (change_dir, summary["datasets"], datasets))
+    return summary
+
+
+def load_bench(pred_dir, datasets, change_dir=None):
     """{(bench, match, seed): proba, gt labels (both versions), graded mask, halves, tags} for oof/
-    and val_metrica/."""
+    and val_metrica/; with change_dir, also the detector's change_shift()."""
     import build_datasets as bd
+    base = load_change(change_dir, datasets)["base_rate"] if change_dir else None
     items = {}
     for bench, pattern in (("idsse", "oof/*_s*.npz"), ("val_metrica", "val_metrica/*_s?.npz")):
         for path in sorted(glob.glob(os.path.join(pred_dir, pattern))):
@@ -136,13 +175,18 @@ def load_bench(pred_dir, datasets):
             gt = {"harmonized": m["labels"], "raw": bd.load_match(datasets, match, seed, labels="raw")["labels"]}
             items[bench, match, seed] = {"p": np.load(path)["p"], "gt": gt, "graded": graded, "halves": halves,
                                          "tags": set_pieces(m["smart_tagging"], m["meta"]["home"], m["meta"]["away"])}
+            if change_dir:
+                same = os.path.join(change_dir, os.path.basename(os.path.dirname(path)), os.path.basename(path))
+                items[bench, match, seed]["change"] = change_shift(np.load(same)["p_change"], base)
     return items
 
 
 def decode_items(items, setting, block):
     """{key: labels} for one setting."""
     costs = [[setting[c] for c in COSTS]]
-    return {key: decode(it["p"], it["halves"], it["tags"], costs, setting["tag_margin_s"], block)[0]
+    ks = [setting.get("change_k", 0)]
+    return {key: decode(it["p"], it["halves"], it["tags"], costs, setting["tag_margin_s"], block,
+                        it.get("change"), ks)[0]
             for key, it in items.items()}
 
 
@@ -156,7 +200,9 @@ def evaluate(items, settings, block, fit_on=BENCHES, target="harmonized"):
         for margin in margins:
             idx = [i for i, s in enumerate(settings) if s["tag_margin_s"] == margin]
             costs = [[settings[i][c] for c in COSTS] for i in idx]
-            for i, pred in zip(idx, decode(it["p"], it["halves"], it["tags"], costs, margin, block)):
+            ks = [settings[i].get("change_k", 0) for i in idx]
+            preds = decode(it["p"], it["halves"], it["tags"], costs, margin, block, it.get("change"), ks)
+            for i, pred in zip(idx, preds):
                 results[i][bench].append(dict(score(gt, pred, it["graded"]), match=match, seed=seed))
     out = []
     for rows in results:
@@ -170,13 +216,16 @@ def evaluate(items, settings, block, fit_on=BENCHES, target="harmonized"):
 
 
 def fit(items, block, fit_on, target, passes=3):
-    """Coordinate descent over GRID from START; returns the best setting and the search trace."""
-    best = dict(START)
+    """Coordinate descent over GRID from START (plus change_k when the items carry a change signal);
+    returns the best setting and the search trace."""
+    grid, best = dict(GRID), dict(START)
+    if any("change" in it for it in items.values()):
+        grid["change_k"], best["change_k"] = CHANGE_GRID, 0
     best_score = evaluate(items, [best], block, fit_on, target)[0]
     trace = []
     for p in range(passes):
         changed = False
-        for name, values in GRID.items():
+        for name, values in grid.items():
             settings = [dict(best, **{name: v}) for v in values]
             scores = evaluate(items, settings, block, fit_on, target)
             for s, r in zip(settings, scores):
@@ -193,8 +242,9 @@ def fit(items, block, fit_on, target, passes=3):
     return best, trace
 
 
-def decoder_file(pred_dir, fit_on, target):
-    return os.path.join(pred_dir, "decoder_%s%s.json" % (fit_on, "_raw" if target == "raw" else ""))
+def decoder_file(pred_dir, fit_on, target, change=None):
+    suffix = "_" + os.path.basename(os.path.normpath(change)) if change else ""
+    return os.path.join(pred_dir, "decoder_%s%s%s.json" % (fit_on, "_raw" if target == "raw" else "", suffix))
 
 
 def candidate_predictions():
@@ -202,6 +252,21 @@ def candidate_predictions():
     import build_datasets as bd
     folder = os.path.basename(bd.DEFAULT_DATASETS).replace("datasets", "predictions", 1)
     return os.path.join(ROOT, "external", folder, "cv_gbm_raw_" + "-".join(MODEL_GROUPS))
+
+
+def pred_datasets(pred_dir, datasets=None):
+    """The classifier's summary.json and the datasets folder its predictions go with: the one they
+    were made on, unless another is given (refused if it differs from the one they were made on)."""
+    with open(os.path.join(pred_dir, "summary.json")) as handle:
+        summary = json.load(handle)
+    made_on = summary.get("datasets")
+    if made_on and datasets and os.path.basename(os.path.normpath(datasets)) != made_on:
+        raise SystemExit("%s was made on external/%s, not on %s" % (pred_dir, made_on, datasets))
+    if made_on and datasets is None:
+        import build_datasets as bd
+        if made_on != os.path.basename(bd.DEFAULT_DATASETS):
+            datasets = os.path.join(ROOT, "external", made_on)
+    return summary, resolve_datasets(datasets)
 
 
 def main():
@@ -215,6 +280,8 @@ def main():
                         help="the bench(es) the costs are fitted on (default: idsse, the candidate)")
     parser.add_argument("--target", choices=VERSIONS, default="harmonized",
                         help="the IDSSE labels the costs are fitted against (Metrica: always its own)")
+    parser.add_argument("--change", default=None,
+                        help="a change_detector.py output folder: the switch cost then depends on it (change_k)")
     parser.add_argument("--log", action="store_true", help="append the results to experiments/log.csv")
     args = parser.parse_args()
     fit_on = BENCHES if args.fit_on == "both" else (args.fit_on,)
@@ -222,29 +289,23 @@ def main():
     if not os.path.isfile(os.path.join(args.pred, "summary.json")):
         raise SystemExit("no predictions in %s: run python src/mtah/train_classifier.py first" % args.pred)
 
-    with open(os.path.join(args.pred, "summary.json")) as handle:
-        summary = json.load(handle)
-    trained_on, made_on = summary["labels"], summary.get("datasets")
-    if made_on and args.datasets and os.path.basename(os.path.normpath(args.datasets)) != made_on:
-        raise SystemExit("%s was made on external/%s, not on %s" % (args.pred, made_on, args.datasets))
-    if made_on and args.datasets is None:
-        import build_datasets as bd
-        if made_on != os.path.basename(bd.DEFAULT_DATASETS):
-            args.datasets = os.path.join(ROOT, "external", made_on)
-    args.datasets = resolve_datasets(args.datasets)
+    summary, args.datasets = pred_datasets(args.pred, args.datasets)
+    trained_on = summary["labels"]
     print("datasets %s" % args.datasets)
     name = os.path.basename(os.path.normpath(args.pred))
     t0 = time.time()
-    items = load_bench(args.pred, args.datasets)
-    print("%s: %d sequences, classifier on %s labels, block %d frames, fitted on %s (IDSSE vs %s labels)" % (
-        name, len(items), trained_on, args.block, " + ".join(fit_on), args.target))
+    items = load_bench(args.pred, args.datasets, args.change)
+    print("%s: %d sequences, classifier on %s labels, block %d frames, fitted on %s (IDSSE vs %s labels)%s" % (
+        name, len(items), trained_on, args.block, " + ".join(fit_on), args.target,
+        ", switch cost from %s" % os.path.basename(os.path.normpath(args.change)) if args.change else ""))
     best, trace = fit(items, args.block, fit_on, args.target)
     print("best: %s" % ", ".join("%s %g" % kv for kv in best.items()))
 
     cache = os.path.dirname(os.path.normpath(args.pred))
     report, log = {}, []
-    change = "%s + HMM decoder fitted on %s vs %s labels (provisional: %s)" % (
-        name, " + ".join(fit_on), args.target, ", ".join("%s %g" % kv for kv in best.items()))
+    change = "%s + HMM decoder%s fitted on %s vs %s labels (provisional: %s)" % (
+        name, " with the switch cost from %s" % os.path.basename(os.path.normpath(args.change)) if args.change else "",
+        " + ".join(fit_on), args.target, ", ".join("%s %g" % kv for kv in best.items()))
     for version in VERSIONS:
         scores = evaluate(items, [best], args.block, BENCHES, version)[0]
         report[version] = {"scores": {b: scores[b] for b in BENCHES}, "rows": scores["rows"]}
@@ -265,10 +326,14 @@ def main():
             if b == "idsse" or version == "harmonized":
                 log.append((change, "%s/%s labels" % ("cv_idsse oof" if b == "idsse" else "val_metrica ensemble of rounds",
                                                       version if b == "idsse" else "metrica"), s, base))
-    out = decoder_file(args.pred, args.fit_on, args.target)
+    out = decoder_file(args.pred, args.fit_on, args.target, args.change)
+    saved = {"provisional": True, "block": args.block, "trained_on": trained_on, "fit_on": fit_on,
+             "target": args.target, "params": best, "report": report, "trace": trace}
+    if args.change:
+        saved["change"] = os.path.relpath(os.path.abspath(args.change), ROOT).replace(os.sep, "/")
+        saved["change_base_rate"] = load_change(args.change, args.datasets)["base_rate"]   # the zero of change_k
     with open(out, "w") as handle:
-        json.dump({"provisional": True, "block": args.block, "trained_on": trained_on, "fit_on": fit_on,
-                   "target": args.target, "params": best, "report": report, "trace": trace}, handle, indent=2)
+        json.dump(saved, handle, indent=2)
     print("saved %s  (%.0f s)" % (out, time.time() - t0))
     if args.log:
         append_log(log)

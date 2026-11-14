@@ -129,6 +129,10 @@ src/mtah/                         nuestro código
   gaps.py                         huecos sin balón
   decoder.py                      decodificador temporal (HMM/Viterbi); parámetros provisionales
                                   hasta el diagnóstico del balón (tools/ball_gap_diagnostic.py)
+  decoder_analysis.py             dónde pierde posesiones el decodificador (por duración, inicio,
+                                  balón, modo de fallo, culpa) y techos con oráculos; solo bancos
+  change_detector.py              detector de robos (cambio H/A sin parada a ≤ 0,4 s), para la multa
+                                  de cambio variable del decodificador (decoder.py --change); experimento
   pipeline.py                     une los módulos y escribe el CSV
 scripts/make_submission.py        el único comando que regenera la entrega
 validation/                       banco de validación con otros partidos
