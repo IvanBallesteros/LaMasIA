@@ -3,6 +3,63 @@
 Una entrada por decisión: qué se decidió, por qué, con qué datos y qué queda abierto. Las más
 recientes, arriba.
 
+## 2026-11-15 · La entrega va con el detector de robos (`--change`); los test se miden una vez (equipo)
+
+**Qué.**
+- La entrega es `make_submission.py --train --change` y `--predict --change`:
+  - el clasificador de siempre (`2dcb9cf5…`);
+  - el detector de robos de `src/mtah/change_detector.py` (`4271d8dd…`, datos `2a9afae6…`);
+  - los costes de `scripts/decoder_idsse_change.json`: switch 32, to_dead 64, from_dead 16,
+    from_dead_tag 4, tag_margin_s 2 y change_k 4.
+- La versión sin detector se queda en el código tal como está, pero no se entrega.
+- Desde esta entrada no cambia nada del modelo.
+- Los test (J03WR9 y METRICA3) se miden **una sola vez**, con `scripts/evaluate_test.py`, y el
+  resultado va tal cual a `experiments/log.csv` y al documento técnico, sea el que sea.
+- Solo un error claro del código justifica medirlos otra vez.
+
+**Por qué.**
+- Bootstrap pareado frente a la versión sin detector (`src/mtah/compare.py`, 1000 remuestreos por
+  partido, intervalo del 95 %):
+
+  | | IDSSE armonizadas | IDSSE originales | val_metrica |
+  |---|---|---|---|
+  | sin detector | 0,621 | 0,512 | 0,615 |
+  | con detector | 0,627 | 0,526 | 0,633 |
+  | diferencia | +0,006 [+0,001, +0,011] | +0,013 [+0,009, +0,017] | +0,018 [+0,007, +0,031] |
+
+- Partido a partido gana en 14 de 16 comparaciones. Las dos que pierde son J03WOY (−0,008) y J03WQQ
+  (−0,005), con etiquetas armonizadas, y sus intervalos incluyen el 0.
+- Va a lo que más falla: las posesiones cortas que empiezan con un robo en juego. Predice un 4 % más
+  de posesiones, y siguen siendo menos que las reales: 258 frente a 247 en IDSSE (hay 315) y 230
+  frente a 219 en Metrica (hay 334).
+- El efecto está acotado. El detector solo cambia el coste de pasar de un equipo al otro: va de 0 a
+  ~55, y vale 32 donde el detector está en su media.
+
+**Riesgos que aceptamos.**
+- La mejora es pequeña, por debajo de los ~0,04 de ruido entre partidos. Puede no notarse en el
+  ranking.
+- El detector usa `turn`, la dirección del balón, que el 8/11 no superó el ruido en el clasificador.
+  Además depende del balón, que es lo más incierto de nuestra simulación. En el partido falso baja
+  de 0,584 a 0,554. El partido falso no sirve para decidir, pero avisa de que la mejora no está
+  garantizada si los datos se parecen menos a los de entrenamiento.
+- Es otra idea probada con los mismos 8 partidos (ver 2026-11-08), así que puede ganar por suerte.
+  Por eso la cifra limpia será la de test.
+- Las multas y el peso del detector se ajustaron solo con IDSSE. Metrica se usó para decidir si el
+  detector se quedaba, así que su cifra ya no es del todo limpia.
+
+**Con qué datos.** IDSSE train + val, en validación cruzada, y val_metrica. Nada del partido del reto,
+y los test siguen sin mirarse. Se ha reproducido en dos ordenadores: los mismos costes, las mismas
+cifras y las mismas huellas del clasificador y del detector. `tests/test_make_submission.py` pasa con
+y sin `--change`.
+
+**Abierto.**
+- ¿Se probaron otras configuraciones del detector (radio, etiquetas, grupos) mirando Metrica? En
+  el log solo hay una, la de ±0,4 s (como la regla de control de las etiquetas armonizadas), con
+  etiquetas armonizadas y todos los grupos menos `touches` (Lucas).
+- Por qué SkillCorner queda fuera (Lucas).
+- Quitar la etiqueta «experimental» de `--change` y poner el comando final en el README y en el
+  documento técnico.
+
 ## 2026-11-08 · Clasificador: ni pesos en los cambios ni grupo `turn`; se cierra el modelo (Martina)
 
 **Qué.**
