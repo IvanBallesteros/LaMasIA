@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """What we deliver is what we validated. No real data: fake_data and the public banks only.
 
-    python scripts/make_submission.py --train          # first, once
-    python tests/test_make_submission.py               # about ten minutes
+    python scripts/make_submission.py --train                      # first, once
+    python tests/test_make_submission.py                           # the submission, about ten minutes
 
-    python scripts/make_submission.py --train --change # EXPERIMENTAL: the turnover detector too
-    python tests/test_make_submission.py --change      # the same checks on the --change path
+    python tests/test_make_submission.py --without-detector        # the same checks on the earlier pipeline
 
     fake match   fake_data/seed0 end to end through the command itself: the contract of the file,
                  X outside the graded halves, D before the second-half kick-off
@@ -69,11 +68,11 @@ def expect(ok, what, failures):
         failures.append(what)
 
 
-def fake_match(failures, data_dir, change=False):
+def fake_match(failures, data_dir, change=True):
     """The command on the fake match, twice: the file's contract and determinism."""
     import possession_metrics as pm
     work = tempfile.mkdtemp(prefix="submission_", dir=os.path.join(ROOT, "fake_data"))
-    flag = ["--change"] if change else []
+    flag = [] if change else ["--without-detector"]
     try:
         gt = os.path.join(data_dir, "BAR-ATH_possession_gt_fake.csv")
         first = os.path.join(work, "first")
@@ -101,7 +100,7 @@ def fake_match(failures, data_dir, change=False):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def equivalence(failures, datasets, match, seed, decimals, change=False):
+def equivalence(failures, datasets, match, seed, decimals, change=True):
     """The command on an exported bank match against the path of the validation."""
     import build_datasets as bd
     from export_challenge_format import export
@@ -110,9 +109,9 @@ def equivalence(failures, datasets, match, seed, decimals, change=False):
     try:
         export(datasets, match, seed, work, decimals=decimals)
         out = os.path.join(work, "out")
-        print("--- %s s%d, exported with %d decimals%s" % (match, seed, decimals, ", --change" if change else ""))
+        print("--- %s s%d, exported with %d decimals%s" % (match, seed, decimals, "" if change else ", --without-detector"))
         print(run_command("--data-dir", work, "--exported", "--out", out, "--team", "eq", "--save-proba",
-                          *(["--change"] if change else [])))
+                          *([] if change else ["--without-detector"])))
         labels = read_labels(os.path.join(out, "eq.csv"))
         saved = np.load(os.path.join(out, "eq_proba.npz"))
         proba = saved["p"]
@@ -162,14 +161,16 @@ def main():
     parser.add_argument("--fake", default=os.path.join(ROOT, "fake_data", "seed0"))
     parser.add_argument("--datasets", default=ms.DATASETS)
     parser.add_argument("--match", nargs="+", default=["J03WOY", "J03WMX"], help="val matches (seed 0)")
-    parser.add_argument("--change", action="store_true",
-                        help="test the EXPERIMENTAL --change path instead (after make_submission.py --train --change)")
+    parser.add_argument("--without-detector", action="store_true",
+                        help="test the earlier pipeline, not submitted (make_submission.py --without-detector)")
+    parser.add_argument("--change", action="store_true", help=argparse.SUPPRESS)   # the default now; older commands
     args = parser.parse_args()
+    change = not args.without_detector
     failures = []
-    fake_match(failures, args.fake, args.change)
+    fake_match(failures, args.fake, change)
     for match in args.match:
-        equivalence(failures, args.datasets, match, 0, EXACT_DECIMALS, args.change)
-    equivalence(failures, args.datasets, args.match[0], 0, 6, args.change)
+        equivalence(failures, args.datasets, match, 0, EXACT_DECIMALS, change)
+    equivalence(failures, args.datasets, args.match[0], 0, 6, change)
     print("\nPASSED" if not failures else "\nFAILED:\n  " + "\n  ".join(failures))
     sys.exit(1 if failures else 0)
 

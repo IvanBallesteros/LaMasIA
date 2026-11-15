@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""The one command that regenerates the submission: train the final model, predict the match.
+"""The one command that regenerates the submission: train the final models, predict the match.
 
     python tools/build_datasets.py --verify                         # the public datasets, once
     python scripts/make_submission.py --data-dir "$MTAH_DATA_DIR"   # --train, then --predict
 
-    python scripts/make_submission.py --train                       # only the model
+    python scripts/make_submission.py --train                       # only the models
     python scripts/make_submission.py --predict --data-dir fake_data/seed0
     python scripts/make_submission.py --predict --data-dir ... --check-public-5min
 
---train fits the candidate (src/mtah/features.py MODEL_GROUPS, the classifier's default parameters,
-the original labels) on every IDSSE train + val match and seed, that is, the union of the folds of
+The submission (docs/DECISIONS.md, 2026-11-15) is the classifier, the turnover detector and the
+decoder whose switch cost follows the detector. --without-detector gives the earlier pipeline, the
+classifier and the plain decoder, which is not submitted.
+
+--train fits the classifier (src/mtah/features.py MODEL_GROUPS, train_classifier.HYPERPARAMETERS, the
+original labels) on every IDSSE train + val match and seed, that is, the union of the folds of
 src/mtah/train_classifier.py, sampled the same way. It writes external/models/<name>/model.joblib
-and manifest.json (commit, datasets, groups, labels, library versions, hashes).
+and manifest.json (commit, datasets, groups, labels, library versions, hashes). It then fits the
+turnover detector (src/mtah/change_detector.py: every group but touches, harmonized labels, +-0.4 s)
+on the same matches and seeds, in external/models/change_gbm_harmonized_r0.4/.
 
 --predict reads the match with the readers tests/test_challenge_roundtrip.py checks
 (tools/heuristic_pipeline.load_tracking and starter/load_smart_tagging), computes frame_features(),
-predicts, decodes with the costs in scripts/decoder_idsse.json and writes frame,label for every
-video frame: X outside the graded halves and D between the start of the graded second half and its
-kick-off. The file goes through evaluation/validate_submission.py.
+predicts, decodes with the costs in scripts/decoder_idsse_change.json (src/mtah/decoder.py --change)
+and writes frame,label for every video frame: X outside the graded halves and D between the start
+of the graded second half and its kick-off. The file goes through evaluation/validate_submission.py.
 
 The file is written next to the data, in <data-dir>/submission/<team>.csv, so a file built from the
-real match never lands in the repository.
+real match never lands in the repository. --without-detector writes to
+<data-dir>/submission_without_detector/ instead, so it never overwrites the submission.
 
 REAL DATA: the console prints aggregates only (rows per label, possessions per half, % D, possession
 lengths) and an error never prints data unless --debug is given, which is for fake data. Paste the
@@ -29,17 +36,15 @@ console output, never anything else from the data folder.
 --check-public-5min adds spellF1 and macroF1 of the file and of smooth50 on the 5 public minutes. It
 is a check that the pipeline is aligned: RULES.md forbids choosing anything with it.
 
-EXPERIMENTAL, off by default: --change adds the turnover detector (src/mtah/change_detector.py), which
-makes the decoder's switch cost depend on the input (src/mtah/decoder.py --change). --train --change
-also fits the detector on the same IDSSE matches and seeds (harmonized labels, +-0.4 s);
---predict --change decodes with scripts/decoder_idsse_change.json and writes to
-<data-dir>/submission_change, so the candidate's file is never overwritten. Without --change
-nothing differs from the candidate.
+--change is accepted and does nothing: the detector, which it used to switch on, is now the
+default, so the commands written before still give the submission.
 
 Exact reproduction: fixed seeds, pinned libraries (requirements-mtah.txt) and one OpenMP thread,
 because the boosting sums gradients in parallel and the number of threads moves the last bits of the
-model between machines. scripts/decoder_idsse.json and scripts/bank_reference.json are small and
-live in the repository; --bank-reference refreshes the second from a train_classifier.py run.
+model between machines. The decoder costs (scripts/decoder_idsse_change.json, and
+scripts/decoder_idsse.json without the detector) and the bank aggregates (bank_reference_change.json,
+bank_reference.json) are small and live in the repository; --bank-reference refreshes the latter
+from the train_classifier.py and change_detector.py runs.
 """
 
 import os
@@ -82,7 +87,7 @@ MODELS = os.path.join(ROOT, "external", "models")
 PREDICTIONS = os.path.join(ROOT, "external", "predictions_v2_1")
 COSTS_FILE = os.path.join(HERE, "decoder_idsse.json")
 REFERENCE_FILE = os.path.join(HERE, "bank_reference.json")
-# --change (experimental): the turnover detector, as src/mtah/change_detector.py runs it by default
+# the turnover detector (submitted; off with --without-detector), as src/mtah/change_detector.py runs it by default
 CHANGE_GROUPS = cd.DEFAULT_GROUPS
 CHANGE_LABELS = "harmonized"
 CHANGE_RADIUS_S = 0.4
@@ -221,11 +226,11 @@ def load_change_model(models_dir):
     import joblib
     folder = os.path.join(models_dir, CHANGE_NAME)
     if not os.path.isfile(os.path.join(folder, "manifest.json")):
-        raise SystemExit("no turnover detector in %s: run python scripts/make_submission.py --train --change" % folder)
+        raise SystemExit("no turnover detector in %s: run python scripts/make_submission.py --train" % folder)
     with open(os.path.join(folder, "manifest.json")) as handle:
         manifest = json.load(handle)
     if manifest["columns"] != change_columns() or manifest["labels"] != CHANGE_LABELS or manifest["radius_s"] != CHANGE_RADIUS_S:
-        raise SystemExit("the detector in %s is not the one this code describes: run --train --change" % folder)
+        raise SystemExit("the detector in %s is not the one this code describes: run --train" % folder)
     return joblib.load(os.path.join(folder, "model.joblib")), manifest
 
 
@@ -263,7 +268,8 @@ def load_model(models_dir):
 
 
 def load_costs():
-    """The decoder costs of the candidate, fitted on the IDSSE folds (src/mtah/decoder.py --fit-on idsse)."""
+    """The decoder costs without the detector (--without-detector), fitted on the IDSSE folds
+    (src/mtah/decoder.py --fit-on idsse)."""
     with open(COSTS_FILE) as handle:
         costs = json.load(handle)
     if costs["trained_on"] != LABELS or list(costs["fit_on"]) != ["idsse"]:
@@ -387,8 +393,8 @@ def summarise(labels, play):
 
 
 def bank_reference(args):
-    """scripts/bank_reference.json: the same aggregates on the banks, from the candidate's
-    out-of-fold predictions decoded with the same costs. Public data only."""
+    """scripts/bank_reference_change.json (bank_reference.json with --without-detector): the same
+    aggregates on the banks, from the out-of-fold predictions decoded with the same costs. Public data only."""
     costs = load_change_costs() if args.change else load_costs()
     pred = os.path.join(args.predictions, CV_NAME)
     items = decoder.load_bench(pred, args.datasets, os.path.join(args.predictions, CHANGE_NAME) if args.change else None)
@@ -463,7 +469,9 @@ def predict(args):
     print("model %s (commit %s, datasets %s); decoder %s" % (manifest["name"], manifest["commit"], manifest["datasets"], costs["params"]))
     if args.change:
         change_model, change_manifest = load_change_model(args.models_dir)
-        print("EXPERIMENTAL --change: turnover detector %s (commit %s)" % (change_manifest["name"], change_manifest["commit"]))
+        print("turnover detector %s (commit %s)" % (change_manifest["name"], change_manifest["commit"]))
+    else:
+        print("--without-detector: the earlier pipeline, not the submission")
     players, ball, slot_team, windows = read_match(game, args.data_dir)
     features = frame_features(players, slot_team, ball, game["pitch"], game["play"], windows, MODEL_GROUPS)
     team_check(features, windows)
@@ -475,7 +483,7 @@ def predict(args):
     labels = decode_labels(proba, game["play"], windows, costs, p_change)
     for a, b in game["forced_dead"]:
         labels[a:b + 1] = "D"
-    out_dir = args.out or os.path.join(args.data_dir, "submission_change" if args.change else "submission")
+    out_dir = args.out or os.path.join(args.data_dir, "submission" if args.change else "submission_without_detector")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "%s.csv" % args.team)
     with open(path, "w", newline="\n") as handle:
@@ -499,9 +507,10 @@ def predict(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--train", action="store_true", help="fit the final model on the public datasets")
+    parser.add_argument("--train", action="store_true", help="fit the final models on the public datasets")
     parser.add_argument("--predict", action="store_true", help="write the submission for --data-dir")
-    parser.add_argument("--bank-reference", action="store_true", help="refresh scripts/bank_reference.json")
+    parser.add_argument("--bank-reference", action="store_true",
+                        help="refresh scripts/bank_reference_change.json (bank_reference.json with --without-detector)")
     parser.add_argument("--data-dir", default=games.DATA_DIR, help="the match data (default: MTAH_DATA_DIR, else data/)")
     parser.add_argument("--out", default=None, help="folder of the CSV (default: <data-dir>/submission)")
     parser.add_argument("--team", default="LaMasIA", help="the CSV is <team>.csv: the team name of the registration form")
@@ -513,10 +522,14 @@ def main():
     parser.add_argument("--exported", action="store_true", help="--data-dir is a tools/export_challenge_format.py output (tests)")
     parser.add_argument("--save-proba", action="store_true", help="also write the probabilities next to the CSV (tests)")
     parser.add_argument("--debug", action="store_true", help="show tracebacks: fake data only, they can quote the input")
-    parser.add_argument("--change", action="store_true",
-                        help="EXPERIMENTAL: add the turnover detector (train it with --train, decode with "
-                             "scripts/decoder_idsse_change.json, write to <data-dir>/submission_change)")
+    parser.add_argument("--without-detector", action="store_true",
+                        help="the earlier pipeline, not submitted: no turnover detector, scripts/decoder_idsse.json, "
+                             "written to <data-dir>/submission_without_detector")
+    parser.add_argument("--change", action="store_true", help=argparse.SUPPRESS)   # the default now; older commands
     args = parser.parse_args()
+    if args.change and args.without_detector:
+        raise SystemExit("--change (the detector) and --without-detector contradict each other")
+    args.change = not args.without_detector             # the rest of this file reads args.change: the detector
     run_all = not (args.train or args.predict or args.bank_reference)
     try:
         if args.train or run_all:

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """The test matches, scored once with the submitted pipeline.
 
-    python scripts/make_submission.py --train --change      # the final models, first
+    python scripts/make_submission.py --train               # the final models, first
     python scripts/evaluate_test.py                         # J03WR9 (IDSSE) and METRICA3, once
     python scripts/evaluate_test.py --splits val            # a dry run of this code on the val matches
 
 The submitted pipeline (docs/DECISIONS.md, 2026-11-15) is the classifier and the turnover detector of
-scripts/make_submission.py --train --change, trained on the six IDSSE train + val matches only, with
+scripts/make_submission.py --train, trained on the six IDSSE train + val matches only, with
 the decoder costs of scripts/decoder_idsse_change.json. Each match goes through the submission's own
 functions (make_submission.predict_proba, predict_change and decode_labels) on the features of the
 validation path, which tests/test_make_submission.py shows give the submission's labels exactly.

@@ -132,9 +132,11 @@ src/mtah/                         nuestro código
   decoder_analysis.py             dónde pierde posesiones el decodificador (por duración, inicio,
                                   balón, modo de fallo, culpa) y techos con oráculos; solo bancos
   change_detector.py              detector de robos (cambio H/A sin parada a ≤ 0,4 s), para la multa
-                                  de cambio variable del decodificador (decoder.py --change); experimento
+                                  de cambio variable del decodificador (decoder.py --change); va en la
+                                  entrega (DECISIONS.md, 15/11)
   pipeline.py                     une los módulos y escribe el CSV
-scripts/make_submission.py        el único comando que regenera la entrega
+scripts/make_submission.py        el único comando que regenera la entrega (con el detector por defecto)
+scripts/evaluate_test.py          los partidos de test, medidos una sola vez con los modelos finales
 validation/                       banco de validación con otros partidos
 experiments/log.csv               registro de experimentos
 docs/technical_document.md        borrador del documento técnico
@@ -211,10 +213,18 @@ python tests/test_challenge_roundtrip.py     # un partido del banco en formato d
   - La versión actual está en un solo sitio: `DATASETS_VERSION` y `DEFAULT_DATASETS` en
     `tools/build_datasets.py`.
 - **El candidato por defecto**: `python src/mtah/train_classifier.py` y luego
-  `python src/mtah/decoder.py`, sin parámetros, reproducen el candidato de la entrega: etiquetas
-  originales, todos los grupos de `MODEL_GROUPS` (`gap` incluido) y costes ajustados en IDSSE contra
-  las etiquetas armonizadas. Explorar otra cosa hay que pedirlo: `--labels harmonized raw`,
-  `--without gap`, `--fit-on both`. Con `--fit-on both`, val_metrica deja de ser independiente.
+  `python src/mtah/decoder.py`, sin parámetros, reproducen el clasificador de la entrega y el
+  decodificador sin detector: etiquetas originales, todos los grupos de `MODEL_GROUPS` (`gap`
+  incluido) y costes ajustados en IDSSE contra las etiquetas armonizadas. Explorar otra cosa hay que
+  pedirlo: `--labels harmonized raw`, `--without gap`, `--fit-on both`. Con `--fit-on both`,
+  val_metrica deja de ser independiente.
+- **La entrega lleva además el detector de robos** (DECISIONS.md, 15/11): después de los dos
+  comandos anteriores, `python src/mtah/change_detector.py` y
+  `python src/mtah/decoder.py --change external/predictions_v2_1/change_gbm_harmonized_r0.4`.
+  `scripts/make_submission.py` usa el detector por defecto; `--without-detector` da la versión
+  anterior.
+- **Los test ya se midieron, una vez** (15/11, `scripts/evaluate_test.py`). No se vuelven a medir
+  ni se cambia nada por su resultado.
 
 - **IDSSE**: 7 partidos de la Bundesliga y la 2. Bundesliga 2022/23 (Bassek et al., Scientific
   Data 2025, CC BY 4.0), con `BallStatus` y `BallPossession` en cada frame. Uso permitido por los

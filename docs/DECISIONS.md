@@ -57,8 +57,28 @@ y sin `--change`.
   el log solo hay una, la de ±0,4 s (como la regla de control de las etiquetas armonizadas), con
   etiquetas armonizadas y todos los grupos menos `touches` (Lucas).
 - Por qué SkillCorner queda fuera (Lucas).
-- Quitar la etiqueta «experimental» de `--change` y poner el comando final en el README y en el
-  documento técnico.
+
+**Resultado de test (medido una vez, el 15/11; `experiments/log.csv`).**
+
+| | spellF1 [intervalo del 90 %] | macroF1 | posesiones / reales | smooth50 |
+|---|---|---|---|---|
+| J03WR9, armonizadas | 0,532 [0,483, 0,578] | 0,858 | 237 / 282 | 0,250 |
+| J03WR9, originales | 0,461 [0,413, 0,508] | 0,851 | 237 / 370 | 0,231 |
+| METRICA3 | 0,572 [0,528, 0,620] | 0,900 | 255 / 381 | 0,223 |
+
+- Queda entre 0,06 y 0,10 por debajo de validación: las cifras de validación guiaron las
+  decisiones, y J03WR9 queda por debajo de todos los partidos de validación de IDSSE (0,58 a 0,69).
+- Sigue siendo más del doble que smooth50.
+- No se cambia nada por este resultado.
+
+**Después: el detector, por defecto (15/11).**
+- `make_submission.py` sin opciones entrena y predice con el detector, y escribe
+  `<datos>/submission/LaMasIA.csv`. Así, quien ejecute el comando sin opciones obtiene lo que
+  entregamos.
+- La versión sin detector queda en `--without-detector`, que escribe en
+  `<datos>/submission_without_detector/`.
+- `--change` se sigue aceptando, pero ya no hace nada.
+- El CSV por defecto es idéntico, byte a byte, al de `--change` de antes.
 
 ## 2026-11-08 · Clasificador: ni pesos en los cambios ni grupo `turn`; se cierra el modelo (Martina)
 
