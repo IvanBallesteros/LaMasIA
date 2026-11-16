@@ -66,3 +66,6 @@ env/
 # -- team: local data (never committed) ---------------------------------------------------------
 external/
 fake_data/
+
+# -- team: local instructions for the coding assistant (see docs/technical_document.md, Section 4)
+CLAUDE.md

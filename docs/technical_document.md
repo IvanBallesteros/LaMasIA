@@ -2,11 +2,6 @@
 
 Team LaMasIA · More than a Hack 2027, Phase 1: Ball Possession.
 
-> **Draft notes (delete before submitting).** Open items, all marked `TODO` in the text: the
-> organisers' reply on calibration and on the Metrica licence (Section 4), and the team's
-> confirmation of how the public minutes and the video were used (Section 4). Check that the team
-> name matches the registration form.
-
 ## 1. Summary
 
 We label every frame of the match as `H`, `A`, `D` or `X` in two stages:
@@ -147,7 +142,8 @@ stayed apart until the system was final, and were then scored once (Section 6).
   spatiotemporal and event data in elite soccer.* Scientific Data, 12. CC BY 4.0.
 - Metrica Sports sample data: <https://github.com/metrica-sports/sample-data>. The repository has
   no formal licence; its README asks users to be responsible and to acknowledge the source, which
-  we do here. [TODO: update with the organisers' reply]
+  we do here. It is published by Metrica Sports, one of the organisers of this challenge. We do not
+  redistribute it: `tools/build_datasets.py` downloads it from that repository.
 
 **Making external matches look like the challenge data.** These matches come with clean tracking and
 known player identities, so we degrade them first (`tools/build_datasets.py`):
@@ -163,12 +159,34 @@ The settings of this degradation were calibrated on **label-free aggregate stati
 provided tracking and Smart Tagging: the share of frames without a ball, the distribution of gap
 lengths, where the ball was last seen before a gap, the percentiles of the positions' second
 difference, and the number and timing of set-piece windows. They use neither the ground truth nor
-the video.
-[TODO: update with the organisers' reply on this calibration]
+the video. A team member ran the diagnostic (`tools/ball_gap_diagnostic.py`), which prints only
+aggregates, and the values are listed in `tools/build_datasets.py` (`REAL_BALL_GAPS`, `TAG_OFFSET`,
+`TAG_RECALL`). They only shape how the external matches are degraded. The models, their settings
+and the decoder costs are fitted on the external matches alone.
 
-**Use of the public ground truth.** The five public minutes were used only to check alignment and
-the meaning of the labels. They were never used to train, tune or choose between versions. The
-output was never compared with the video. [TODO: all four of us confirm this paragraph]
+We asked the organisers about this use. Their reply (9 November 2026) restated the clarification
+email: the algorithm must not be trained, fitted or calibrated on the ground-truth possession data
+or on the provided video, and must be trained and tuned on external data. We read this use as
+compatible with those rules. The algorithm is trained and tuned on external data only. These
+statistics contain no labels, come from neither the ground truth nor the video, and only set how
+that external data is degraded, much like choosing how much noise to add. We describe it here in
+full so that the jury can check it.
+
+**Other uses of the provided game.** Apart from the prediction itself and the calibration above:
+
+- The five public minutes were used only to check alignment and the meaning of the labels, never
+  to train, tune or choose between versions.
+- A second label-free diagnostic (`tools/touch_rate_diagnostic.py`) compared a few signals on the
+  provided tracking and on the external matches, as a check of the simulation. No setting was taken
+  from it.
+- The submission command prints label-free aggregates of our output (share of each label,
+  possessions per half, possession lengths) next to the same figures on the external matches. We
+  used them only to catch pipeline failures, never to change anything.
+- The output was never compared with the video.
+
+**AI assistant.** We wrote code with an LLM assistant (Claude Code), under written instructions
+that kept it away from the match data: the data lives outside the repository, we ran the scripts
+on it ourselves, and the assistant only saw the aggregates they print, as the scripts here show.
 
 ## 5. Possession rules
 
