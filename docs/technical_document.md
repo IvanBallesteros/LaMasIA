@@ -313,6 +313,10 @@ command prints these hashes, and we got the same ones on two different computers
 | Classifier | `2dcb9cf50821698729d775804987a160cc620cdf1cb00ad19fe3c0d08acb6579` | `bd3acaef1ad5be4c815d9be1f0b5c13fe87a38824283ee6beb8b4f285a78a3f1` |
 | Turnover detector | `4271d8dd24d997ba98f094d2997a167211a0adab218a4491b30d6f0bcce29d89` | `2a9afae601006626d2ba9a13c3930d83e0c55370ae706759b9383e10b89d3ff1` |
 
+The submitted file, `LaMasIA.csv`, has sha256
+`96f80ff237074955b16053f6a862bfe8eb6f2184e765d0f8972eb38538b0141a`. The command prints it at the
+end.
+
 Two more commands check the work:
 
 - `python tests/test_make_submission.py` checks the pipeline end to end on simulated data. It also
