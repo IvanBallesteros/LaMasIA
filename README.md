@@ -44,6 +44,10 @@ thread, so the result is the same file, byte for byte.
 The command prints the sha256 of the two models. They should start with `2dcb9cf5` for the
 classifier and `4271d8dd` for the turnover detector: if yours do, the training was identical.
 
+It ends by printing the sha256 of the file. The file we submitted has
+`96f80ff237074955b16053f6a862bfe8eb6f2184e765d0f8972eb38538b0141a`: if yours matches, you have
+reproduced our submission exactly.
+
 Two more commands check the work:
 - `python tests/test_make_submission.py` runs the whole pipeline on simulated data.
 - `python scripts/evaluate_test.py` reproduces the test scores.
